@@ -7,6 +7,8 @@ from backend.app.models import User
 def get_user_by_id(db: Session, user_id: int) -> User | None:
     return db.scalars(select(User).where(User.id == user_id)).first()
 
+def get_users(db: Session) -> list[User]:
+    return list(db.scalars(select(User).order_by(User.id)).all())
 
 def get_user_by_username(db: Session, username: str) -> User | None:
     return db.scalars(select(User).where(User.username == username)).first()
