@@ -67,3 +67,7 @@ def login(login_in: schemas.LoginRequest, db: Session = Depends(get_db)):
 
     access_token = security.create_access_token(data={"sub": str(user.id)})
     return schemas.TokenResponse(access_token=access_token, token_type="bearer")
+
+@app.get("/auth/me", response_model=schemas.UserResponse)
+def read_current_user(current_user: models.User = Depends(get_current_user)):
+    return current_user
