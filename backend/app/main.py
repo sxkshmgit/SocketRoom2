@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from backend.app import crud, models, schemas , security
 from backend.app.database import Base, engine, get_db
+from backend.app.dependencies import get_current_user
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,8 +22,12 @@ def health_check():
     return {"status": "ok"}
 
 @app.get("/users", response_model=list[schemas.UserResponse])
-def list_users(db: Session = Depends(get_db)):
+def list_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     return crud.get_users(db)
+
 @app.post(
     "/users",
     response_model=schemas.UserResponse,
