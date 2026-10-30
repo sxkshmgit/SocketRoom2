@@ -1,7 +1,9 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import User
+from backend.app.models import ChatRoom, User
+
+DEFAULT_ROOM_NAME = "General"
 
 
 def get_user_by_id(db: Session, user_id: int) -> User | None:
@@ -39,3 +41,16 @@ def delete_user(db: Session, user_id: int) -> bool:
     db.delete(user)
     db.commit()
     return True
+
+def ensure_default_room(db: Session) -> ChatRoom:
+    room = db.scalars(
+        select(ChatRoom).where(ChatRoom.name == DEFAULT_ROOM_NAME)
+    ).first()
+    if room is not None:
+        return room
+
+    room = ChatRoom(name=DEFAULT_ROOM_NAME)
+    db.add(room)
+    db.commit()
+    db.refresh(room)
+    return room
