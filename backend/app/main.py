@@ -5,17 +5,20 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy.exc import IntegrityError
 from backend.app import crud, models, schemas , security
-from backend.app.database import Base, engine, get_db
+from backend.app.database import Base, SessionLocal, engine, get_db
 from backend.app.dependencies import get_current_user
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        crud.ensure_default_room(db)
+    finally:
+        db.close()
     yield
 
-
 app = FastAPI(lifespan=lifespan)
-
 
 @app.get("/health")
 def health_check():
