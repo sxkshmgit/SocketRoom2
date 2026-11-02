@@ -40,5 +40,6 @@ class MessageResponse(BaseModel):
     id: int
     room_id: int
     sender_id: int
+    sender_username: str
     content: str
     created_at: datetime

@@ -1,12 +1,23 @@
+import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI , HTTPException , Query , status
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError , SQLAlchemyError
 from backend.app import crud, models, schemas , security
 from backend.app.database import Base, SessionLocal, engine, get_db
-from backend.app.dependencies import get_current_user
+from backend.app.connection_manager import manager
+from backend.app.dependencies import get_current_user, get_user_from_token
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,3 +100,99 @@ def list_messages(
         )
 
     return crud.get_recent_messages(db, room.id, limit)
+
+AUTH_TIMEOUT_SECONDS = 10
+
+
+def authenticate_token(token: str) -> tuple[int, str] | None:
+    db = SessionLocal()
+    try:
+        user = get_user_from_token(db, token)
+        if user is None:
+            return None
+        return user.id, user.username
+    except SQLAlchemyError:
+        return None
+    finally:
+        db.close()
+
+
+def save_chat_message(user_id: int, content: str) -> dict | None:
+    db = SessionLocal()
+    try:
+        room = crud.get_default_room(db)
+        if room is None:
+            return None
+        message = crud.create_message(db, room.id, user_id, content)
+        return schemas.MessageResponse.model_validate(message).model_dump(mode="json")
+    except SQLAlchemyError:
+        db.rollback()
+        return None
+    finally:
+        db.close()
+
+
+@app.websocket("/ws")
+async def websocket_chat(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        try:
+            auth_frame = await asyncio.wait_for(
+                websocket.receive_json(), timeout=AUTH_TIMEOUT_SECONDS
+            )
+        except (asyncio.TimeoutError, ValueError, KeyError, TypeError):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        token = None
+        if isinstance(auth_frame, dict) and auth_frame.get("type") == "auth":
+            auth_data = auth_frame.get("data")
+            if isinstance(auth_data, dict):
+                token = auth_data.get("token")
+
+        identity = authenticate_token(token) if isinstance(token, str) else None
+        if identity is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        user_id, username = identity
+        await websocket.send_json(
+            {"type": "auth_ok", "data": {"user_id": user_id, "username": username}}
+        )
+        manager.connect(websocket)
+
+        while True:
+            try:
+                frame = await websocket.receive_json()
+            except (ValueError, KeyError, TypeError):
+                await websocket.send_json(
+                    {"type": "error", "content": "Invalid message format"}
+                )
+                continue
+
+            if not isinstance(frame, dict) or frame.get("type") != "message":
+                await websocket.send_json(
+                    {"type": "error", "content": "Unsupported message type"}
+                )
+                continue
+
+            try:
+                message_in = schemas.MessageCreate(content=frame.get("content"))
+            except ValidationError:
+                await websocket.send_json(
+                    {"type": "error", "content": "Message content is invalid"}
+                )
+                continue
+
+            payload = save_chat_message(user_id, message_in.content)
+            if payload is None:
+                await websocket.send_json(
+                    {"type": "error", "content": "Message could not be saved"}
+                )
+                continue
+
+            await manager.broadcast({"type": "message", "data": payload})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(websocket)
