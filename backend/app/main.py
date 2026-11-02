@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-
+from pathlib import Path
 from fastapi import (
     Depends,
     FastAPI,
@@ -10,6 +10,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -196,3 +197,6 @@ async def websocket_chat(websocket: WebSocket):
         pass
     finally:
         manager.disconnect(websocket)
+FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
+
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
