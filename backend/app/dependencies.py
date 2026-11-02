@@ -9,6 +9,14 @@ from backend.app.models import User
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+def get_user_from_token(db: Session, token: str) -> User | None:
+    try:
+        payload = security.decode_access_token(token)
+        user_id = int(payload["sub"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        return None
+
+    return crud.get_user_by_id(db, user_id)
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -23,13 +31,7 @@ def get_current_user(
     if credentials is None:
         raise credentials_exception
 
-    try:
-        payload = security.decode_access_token(credentials.credentials)
-        user_id = int(payload["sub"])
-    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
-        raise credentials_exception
-
-    user = crud.get_user_by_id(db, user_id)
+    user = get_user_from_token(db, credentials.credentials)
     if user is None:
         raise credentials_exception
 

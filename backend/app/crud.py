@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import ChatRoom, User
+from backend.app.models import ChatRoom, Message , User
 
 DEFAULT_ROOM_NAME = "General"
 
@@ -54,3 +54,28 @@ def ensure_default_room(db: Session) -> ChatRoom:
     db.commit()
     db.refresh(room)
     return room
+
+def get_default_room(db: Session) -> ChatRoom | None:
+    return db.scalars(
+        select(ChatRoom).where(ChatRoom.name == DEFAULT_ROOM_NAME)
+    ).first()
+
+
+def create_message(
+    db: Session, room_id: int, sender_id: int, content: str
+) -> Message:
+    message = Message(room_id=room_id, sender_id=sender_id, content=content)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def get_recent_messages(db: Session, room_id: int, limit: int = 50) -> list[Message]:
+    newest_first = db.scalars(
+        select(Message)
+        .where(Message.room_id == room_id)
+        .order_by(Message.id.desc())
+        .limit(limit)
+    ).all()
+    return list(reversed(newest_first))
