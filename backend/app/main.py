@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI , HTTPException ,  status
+from fastapi import Depends, FastAPI , HTTPException , Query , status
 from sqlalchemy.orm import Session
 
 from sqlalchemy.exc import IntegrityError
@@ -74,3 +74,18 @@ def login(login_in: schemas.LoginRequest, db: Session = Depends(get_db)):
 @app.get("/auth/me", response_model=schemas.UserResponse)
 def read_current_user(current_user: models.User = Depends(get_current_user)):
     return current_user
+
+@app.get("/messages", response_model=list[schemas.MessageResponse])
+def list_messages(
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    room = crud.get_default_room(db)
+    if room is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Default chat room is not available",
+        )
+
+    return crud.get_recent_messages(db, room.id, limit)
