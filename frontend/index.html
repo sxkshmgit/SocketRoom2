@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SocketRoom</title>
+</head>
+<body>
+    <h1>SocketRoom</h1>
+
+    <section id="auth-view" hidden>
+        <form id="login-form">
+            <h2>Log in</h2>
+            <p>
+                <label>Username
+                    <input id="login-username" type="text" maxlength="50" autocomplete="username" required>
+                </label>
+            </p>
+            <p>
+                <label>Password
+                    <input id="login-password" type="password" autocomplete="current-password" required>
+                </label>
+            </p>
+            <button type="submit">Log in</button>
+            <p>No account? <button type="button" id="show-register">Register</button></p>
+        </form>
+
+        <form id="register-form" hidden>
+            <h2>Register</h2>
+            <p>
+                <label>Username
+                    <input id="register-username" type="text" maxlength="50" autocomplete="username" required>
+                </label>
+            </p>
+            <p>
+                <label>Password
+                    <input id="register-password" type="password" autocomplete="new-password" required>
+                </label>
+            </p>
+            <button type="submit">Create account</button>
+            <p>Already registered? <button type="button" id="show-login">Log in</button></p>
+        </form>
+
+        <p id="auth-error" role="alert" hidden></p>
+    </section>
+
+        <section id="chat-view" hidden>
+        <p>Logged in as <strong id="current-username"></strong></p>
+        <p>Status: <span id="connection-status">Disconnected</span></p>
+        <button type="button" id="logout-button">Log out</button>
+
+        <ul id="message-list" style="list-style: none; padding-left: 0; max-height: 60vh; overflow-y: auto;"></ul>
+
+        <p id="chat-error" role="alert" hidden></p>
+
+        <form id="message-form">
+            <input id="message-input" type="text" maxlength="2000" autocomplete="off" placeholder="Type a message" disabled required>
+            <button type="submit" id="send-button" disabled>Send</button>
+        </form>
+    </section>
+
+    <script src="app.js"></script>
+</body>
+</html>
