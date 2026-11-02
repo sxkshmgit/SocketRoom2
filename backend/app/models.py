@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import ForeignKey , String , Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column , relationship
 
 from backend.app.database import Base
 
@@ -47,3 +47,9 @@ class Message(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+    sender: Mapped[User] = relationship(lazy="joined")
+
+    @property
+    def sender_username(self) -> str:
+        return self.sender.username
