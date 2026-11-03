@@ -14,6 +14,7 @@ const connectionStatus = document.getElementById("connection-status");
 const chatError = document.getElementById("chat-error");
 
 let currentToken = null;
+let currentUserId = null;
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
@@ -158,12 +159,14 @@ async function enterChat() {
     }
 
     currentUsername.textContent = result.data.username;
+    currentUserId = result.data.id;
     showView("chat");
     startChat();
 }
 
-function setStatus(text) {
+function setStatus(text, state = "disconnected") {
     connectionStatus.textContent = text;
+    connectionStatus.className = `status-pill status-pill--${state}`;
 }
 
 function setSendingEnabled(enabled) {
@@ -204,20 +207,27 @@ function formatTimestamp(value) {
 }
 
 function buildMessageElement(message) {
+    const isOwn = currentUserId !== null && message.sender_id === currentUserId;
+
     const item = document.createElement("li");
+    item.className = `message ${isOwn ? "message--own" : "message--other"}`;
     item.dataset.messageId = String(message.id);
 
-    const header = document.createElement("div");
+    const meta = document.createElement("div");
+    meta.className = "message__meta";
     const sender = document.createElement("strong");
+    sender.className = "message__sender";
     sender.textContent = message.sender_username;
     const time = document.createElement("time");
+    time.className = "message__time";
     time.textContent = formatTimestamp(message.created_at);
-    header.append(sender, " ", time);
+    meta.append(sender, " ", time);
 
-    const body = document.createElement("p");
-    body.textContent = message.content;
+    const bubble = document.createElement("p");
+    bubble.className = "message__bubble";
+    bubble.textContent = message.content;
 
-    item.append(header, body);
+    item.append(meta, bubble);
     return item;
 }
 
@@ -279,7 +289,7 @@ function handleSocketMessage(raw) {
     if (frame.type === "auth_ok") {
         authenticated = true;
         reconnectAttempts = 0;
-        setStatus("Connected");
+        setStatus("Connected", "connected");
         setSendingEnabled(true);
         clearChatError();
         messageInput.focus();
@@ -313,7 +323,7 @@ function connectSocket() {
     reconnectTimer = null;
     authenticated = false;
     setSendingEnabled(false);
-    setStatus(reconnectAttempts === 0 ? "Connecting..." : "Reconnecting...");
+    setStatus(reconnectAttempts === 0 ? "Connecting..." : "Reconnecting...", "connecting");
 
     const ws = new WebSocket(buildSocketUrl());
     socket = ws;
