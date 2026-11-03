@@ -3,61 +3,93 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b0f17">
     <title>SocketRoom</title>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <h1>SocketRoom</h1>
+    <main class="app">
+        <section id="auth-view" class="auth-view" hidden>
+            <div class="auth-card">
+                <div class="brand">
+                    <span class="brand__mark" aria-hidden="true">S</span>
+                    <span class="brand__name">SocketRoom</span>
+                </div>
 
-    <section id="auth-view" hidden>
-        <form id="login-form">
-            <h2>Log in</h2>
-            <p>
-                <label>Username
-                    <input id="login-username" type="text" maxlength="50" autocomplete="username" required>
-                </label>
-            </p>
-            <p>
-                <label>Password
-                    <input id="login-password" type="password" autocomplete="current-password" required>
-                </label>
-            </p>
-            <button type="submit">Log in</button>
-            <p>No account? <button type="button" id="show-register">Register</button></p>
-        </form>
+                <p id="auth-error" class="alert alert--error" role="alert" hidden></p>
 
-        <form id="register-form" hidden>
-            <h2>Register</h2>
-            <p>
-                <label>Username
-                    <input id="register-username" type="text" maxlength="50" autocomplete="username" required>
-                </label>
-            </p>
-            <p>
-                <label>Password
-                    <input id="register-password" type="password" autocomplete="new-password" required>
-                </label>
-            </p>
-            <button type="submit">Create account</button>
-            <p>Already registered? <button type="button" id="show-login">Log in</button></p>
-        </form>
+                <form id="login-form" class="auth-form auth-form--login">
+                    <span class="auth-form__badge">Log in</span>
+                    <h1 class="auth-form__title">Welcome back</h1>
+                    <p class="auth-form__subtitle">Sign in to join the General room.</p>
 
-        <p id="auth-error" role="alert" hidden></p>
-    </section>
+                    <div class="field">
+                        <label class="field__label" for="login-username">Username</label>
+                        <input class="field__input" id="login-username" type="text" maxlength="50" autocomplete="username" required>
+                    </div>
+                    <div class="field">
+                        <label class="field__label" for="login-password">Password</label>
+                        <input class="field__input" id="login-password" type="password" autocomplete="current-password" required>
+                    </div>
 
-        <section id="chat-view" hidden>
-        <p>Logged in as <strong id="current-username"></strong></p>
-        <p>Status: <span id="connection-status">Disconnected</span></p>
-        <button type="button" id="logout-button">Log out</button>
+                    <button type="submit" class="btn btn--primary btn--block">Log in</button>
+                    <p class="auth-form__switch">
+                        No account?
+                        <button type="button" id="show-register" class="link-button">Register</button>
+                    </p>
+                </form>
 
-        <ul id="message-list" style="list-style: none; padding-left: 0; max-height: 60vh; overflow-y: auto;"></ul>
+                <form id="register-form" class="auth-form auth-form--register" hidden>
+                    <span class="auth-form__badge">New account</span>
+                    <h1 class="auth-form__title">Create your account</h1>
+                    <p class="auth-form__subtitle">Pick a username and password to start chatting.</p>
 
-        <p id="chat-error" role="alert" hidden></p>
+                    <div class="field">
+                        <label class="field__label" for="register-username">Username</label>
+                        <input class="field__input" id="register-username" type="text" maxlength="50" autocomplete="username" required>
+                    </div>
+                    <div class="field">
+                        <label class="field__label" for="register-password">Password</label>
+                        <input class="field__input" id="register-password" type="password" autocomplete="new-password" required>
+                    </div>
 
-        <form id="message-form">
-            <input id="message-input" type="text" maxlength="2000" autocomplete="off" placeholder="Type a message" disabled required>
-            <button type="submit" id="send-button" disabled>Send</button>
-        </form>
-    </section>
+                    <button type="submit" class="btn btn--primary btn--block">Create account</button>
+                    <p class="auth-form__switch">
+                        Already registered?
+                        <button type="button" id="show-login" class="link-button">Log in</button>
+                    </p>
+                </form>
+            </div>
+        </section>
+
+        <section id="chat-view" class="chat" hidden>
+            <header class="chat__header">
+                <div class="chat__room">
+                    <span class="chat__room-icon" aria-hidden="true">#</span>
+                    <div>
+                        <h1 class="chat__room-name">General</h1>
+                        <span id="connection-status" class="status-pill status-pill--disconnected">Disconnected</span>
+                    </div>
+                </div>
+                <div class="chat__user">
+                    <span class="chat__user-label">
+                        <span class="chat__user-prefix">Signed in as</span>
+                        <strong id="current-username" class="chat__username"></strong>
+                    </span>
+                    <button type="button" id="logout-button" class="btn btn--ghost">Log out</button>
+                </div>
+            </header>
+
+            <ul id="message-list" class="message-list" aria-label="Messages"></ul>
+
+            <p id="chat-error" class="alert alert--error chat__error" role="alert" hidden></p>
+
+            <form id="message-form" class="composer">
+                <input id="message-input" class="composer__input" type="text" maxlength="2000" autocomplete="off" placeholder="Message #General" aria-label="Message" disabled required>
+                <button type="submit" id="send-button" class="btn btn--primary composer__send" disabled>Send</button>
+            </form>
+        </section>
+    </main>
 
     <script src="app.js"></script>
 </body>
