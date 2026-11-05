@@ -12,6 +12,9 @@ const messageInput = document.getElementById("message-input");
 const sendButton = document.getElementById("send-button");
 const connectionStatus = document.getElementById("connection-status");
 const chatError = document.getElementById("chat-error");
+const historyError = document.getElementById("history-error");
+const historyErrorText = document.getElementById("history-error-text");
+const historyRetry = document.getElementById("history-retry");
 
 let currentToken = null;
 let currentUserId = null;
@@ -25,6 +28,12 @@ let authenticated = false;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
 const seenMessageIds = new Set();
+const HISTORY_RETRY_BASE_MS = 1000;
+const HISTORY_MAX_RETRIES = 3;
+
+let historyGeneration = 0;
+let historyRetryTimer = null;
+let historyRequestSocket = null;
 
 function showView(name) {
     authView.hidden = name !== "auth";
@@ -256,23 +265,87 @@ function insertMessage(message) {
     }
 }
 
-async function loadHistory() {
+function showHistoryError(message, canRetry) {
+    historyErrorText.textContent = message;
+    historyRetry.hidden = !canRetry;
+    historyError.hidden = false;
+}
+
+function clearHistoryError() {
+    historyErrorText.textContent = "";
+    historyRetry.hidden = true;
+    historyError.hidden = true;
+}
+
+function cancelHistoryLoad() {
+    historyGeneration += 1;
+    historyRequestSocket = null;
+    clearTimeout(historyRetryTimer);
+    historyRetryTimer = null;
+    clearHistoryError();
+}
+
+function isRetryableHistoryFailure(result) {
+    return result.status === 0 || result.status >= 500;
+}
+
+async function loadHistory(attempt = 0) {
     const ws = socket;
+    if (!ws || historyRequestSocket === ws) {
+        return;
+    }
+
+    const generation = ++historyGeneration;
+    historyRequestSocket = ws;
+    clearTimeout(historyRetryTimer);
+    historyRetryTimer = null;
+
+    if (attempt === 0) {
+        clearHistoryError();
+    }
+
     const result = await apiRequest("/messages?limit=100", { token: currentToken });
-    if (ws !== socket) {
+
+    if (historyRequestSocket === ws) {
+        historyRequestSocket = null;
+    }
+
+    if (ws !== socket || generation !== historyGeneration) {
         return;
     }
-    if (!result.ok) {
-        if (result.status === 401) {
-            handleAuthFailure();
-            return;
+
+    if (result.ok) {
+        clearHistoryError();
+        if (Array.isArray(result.data)) {
+            result.data.forEach((message) => insertMessage(message));
         }
-        showChatError("Could not load message history.");
         return;
     }
-    if (Array.isArray(result.data)) {
-        result.data.forEach((message) => insertMessage(message));
+
+    if (result.status === 401) {
+        handleAuthFailure();
+        return;
     }
+
+    if (isRetryableHistoryFailure(result) && attempt < HISTORY_MAX_RETRIES) {
+        const delay = HISTORY_RETRY_BASE_MS * 2 ** attempt;
+
+        showHistoryError(
+            `Could not load message history. Retrying in ${Math.ceil(delay / 1000)}s...`,
+            false
+        );
+
+        historyRetryTimer = setTimeout(() => {
+            historyRetryTimer = null;
+            if (ws === socket && generation === historyGeneration) {
+                loadHistory(attempt + 1);
+            }
+        }, delay);
+
+        return;
+    }
+
+    showHistoryError("Could not load message history.", true);
 }
 
 function handleSocketMessage(raw) {
@@ -348,6 +421,7 @@ function connectSocket() {
         }
         socket = null;
         authenticated = false;
+        cancelHistoryLoad();
         setSendingEnabled(false);
         if (event.code === POLICY_VIOLATION_CODE) {
             handleAuthFailure();
@@ -373,6 +447,7 @@ function stopChat() {
     messageList.replaceChildren();
     seenMessageIds.clear();
     clearChatError();
+    cancelHistoryLoad();
     setStatus("Disconnected");
 }
 
@@ -400,6 +475,12 @@ messageForm.addEventListener("submit", (event) => {
     clearChatError();
     socket.send(JSON.stringify({ type: "message", content }));
     messageInput.value = "";
+});
+
+historyRetry.addEventListener("click", () => {
+    if (socket && authenticated) {
+        loadHistory();
+    }
 });
 
 loginForm.addEventListener("submit", async (event) => {

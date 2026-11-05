@@ -81,7 +81,10 @@
             </header>
 
             <ul id="message-list" class="message-list" aria-label="Messages"></ul>
-
+            <div id="history-error" class="alert alert--error history-error" role="alert" hidden>
+                <span id="history-error-text"></span>
+                <button type="button" id="history-retry" class="btn btn--ghost history-error__retry" hidden>Retry</button>
+            </div>
             <p id="chat-error" class="alert alert--error chat__error" role="alert" hidden></p>
 
             <form id="message-form" class="composer">
