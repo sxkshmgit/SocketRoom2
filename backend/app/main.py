@@ -11,6 +11,7 @@ from fastapi import (
     status,
 )
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -199,4 +200,9 @@ async def websocket_chat(websocket: WebSocket):
         manager.disconnect(websocket)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+@app.get("/", include_in_schema=False)
+def serve_index():
+    return FileResponse(FRONTEND_DIR / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
