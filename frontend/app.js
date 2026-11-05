@@ -1,5 +1,5 @@
 const TOKEN_KEY = "socketroom_token";
-
+const USERNAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
 const authView = document.getElementById("auth-view");
 const chatView = document.getElementById("chat-view");
 const loginForm = document.getElementById("login-form");
@@ -116,7 +116,7 @@ function validationMessage(data) {
         return data.detail
             .map((item) => {
                 const field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : "input";
-                return `${field}: ${item.msg}`;
+                return `${field}: ${String(item.msg).replace(/^Value error, /, "")}`;
             })
             .join(". ");
     }
@@ -510,10 +510,15 @@ registerForm.addEventListener("submit", async (event) => {
     const submitButton = registerForm.querySelector("button[type='submit']");
     submitButton.disabled = true;
 
-    const username = document.getElementById("register-username").value;
+    const username = document.getElementById("register-username").value.trim();
     const password = document.getElementById("register-password").value;
 
     try {
+        if (!USERNAME_PATTERN.test(username)) {
+            showError("Username: use only letters, numbers, underscores, hyphens and periods.");
+            return;
+        }
+
         const result = await apiRequest("/users", {
             method: "POST",
             body: { username, password },

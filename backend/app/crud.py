@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.models import ChatRoom, Message , User
@@ -13,8 +13,14 @@ def get_users(db: Session) -> list[User]:
     return list(db.scalars(select(User).order_by(User.id)).all())
 
 def get_user_by_username(db: Session, username: str) -> User | None:
-    return db.scalars(select(User).where(User.username == username)).first()
-
+    # Exact match first, so legacy mixed-case accounts always resolve to themselves.
+    user = db.scalars(select(User).where(User.username == username)).first()
+    if user is not None:
+        return user
+    # Fallback: case-insensitive match (e.g. "Alice" finds "alice").
+    return db.scalars(
+        select(User).where(func.lower(User.username) == username.lower())
+    ).first()
 
 def create_user(db: Session, username: str, password_hash: str) -> User:
     user = User(username=username, password_hash=password_hash)

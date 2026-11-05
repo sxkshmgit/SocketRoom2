@@ -29,7 +29,7 @@
                     </div>
                     <div class="field">
                         <label class="field__label" for="login-password">Password</label>
-                        <input class="field__input" id="login-password" type="password" autocomplete="current-password" required>
+                        <input class="field__input" id="login-password" type="password" autocomplete="current-password" maxlength="128" required>
                     </div>
 
                     <button type="submit" class="btn btn--primary btn--block">Log in</button>
@@ -42,15 +42,15 @@
                 <form id="register-form" class="auth-form auth-form--register" hidden>
                     <span class="auth-form__badge">New account</span>
                     <h1 class="auth-form__title">Create your account</h1>
-                    <p class="auth-form__subtitle">Pick a username and password to start chatting.</p>
+                    <p class="auth-form__subtitle">Username: letters, numbers, _ . - only. Password: 8–128 characters.</p>
 
                     <div class="field">
                         <label class="field__label" for="register-username">Username</label>
-                        <input class="field__input" id="register-username" type="text" maxlength="50" autocomplete="username" required>
+                        <input class="field__input" id="register-username" type="text" maxlength="50" autocomplete="username" autocapitalize="none" spellcheck="false" required>
                     </div>
                     <div class="field">
                         <label class="field__label" for="register-password">Password</label>
-                        <input class="field__input" id="register-password" type="password" autocomplete="new-password" required>
+                        <input class="field__input" id="register-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
                     </div>
 
                     <button type="submit" class="btn btn--primary btn--block">Create account</button>
