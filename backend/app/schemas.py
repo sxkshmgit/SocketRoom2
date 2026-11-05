@@ -1,11 +1,26 @@
+
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=50)
-    password: str
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def normalize_username(cls, value):
+        if not isinstance(value, str):
+            return value  # let Pydantic report the wrong type
+        value = value.strip()
+        if not USERNAME_PATTERN.fullmatch(value):
+            raise ValueError(
+                "Use only letters, numbers, underscores, hyphens and periods."
+            )
+        return value.lower()
 
 
 class UserUpdate(BaseModel):
@@ -20,9 +35,8 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
-
+    username: str = Field(max_length=50)
+    password: str = Field(max_length=128)
 
 class TokenResponse(BaseModel):
     access_token: str
