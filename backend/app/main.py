@@ -113,8 +113,6 @@ def authenticate_token(token: str) -> tuple[int, str] | None:
         if user is None:
             return None
         return user.id, user.username
-    except SQLAlchemyError:
-        return None
     finally:
         db.close()
 
@@ -152,7 +150,13 @@ async def websocket_chat(websocket: WebSocket):
             if isinstance(auth_data, dict):
                 token = auth_data.get("token")
 
-        identity = authenticate_token(token) if isinstance(token, str) else None
+        try:
+            identity = authenticate_token(token) if isinstance(token, str) else None
+        except SQLAlchemyError:
+            # Temporary server problem, not a bad token: ask the client to retry later.
+            await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+            return
+
         if identity is None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
