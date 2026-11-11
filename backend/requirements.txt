@@ -3,3 +3,4 @@ uvicorn[standard]==0.37.0
 SQLAlchemy==2.1.6
 pwdlib[argon2]
 PyJWT==2.10.1
+pyodbc==5.5.0
