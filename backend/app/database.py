@@ -1,17 +1,22 @@
-import sqlite3
-from pathlib import Path
-
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATABASE_URL = f"sqlite:///{BASE_DIR / 'socketroom.db'}"
+# SQL Server connection settings.
+# No username or password is given, so the mssql+pyodbc dialect automatically
+# uses Windows Authentication (Trusted Connection).
+SQL_SERVER = r".\SQLEXPRESS"
+DATABASE_NAME = "SocketRoomDB"
+ODBC_DRIVER = "ODBC Driver 17 for SQL Server"
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
+DATABASE_URL = URL.create(
+    drivername="mssql+pyodbc",
+    host=SQL_SERVER,
+    database=DATABASE_NAME,
+    query={"driver": ODBC_DRIVER},
 )
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(
     bind=engine,
@@ -19,12 +24,6 @@ SessionLocal = sessionmaker(
     autoflush=False,
 )
 
-@event.listens_for(Engine, "connect")
-def enable_sqlite_foreign_keys(dbapi_connection, connection_record):
-    if isinstance(dbapi_connection, sqlite3.Connection):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
 
 class Base(DeclarativeBase):
     pass
