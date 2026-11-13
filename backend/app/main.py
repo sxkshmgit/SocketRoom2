@@ -103,6 +103,87 @@ def list_messages(
 
     return crud.get_recent_messages(db, room.id, limit)
 
+
+def conversation_response(
+    conversation: models.Conversation,
+    current_user_id: int,
+    last_message_at=None,
+) -> schemas.ConversationResponse:
+    other = conversation.other_user(current_user_id)
+    return schemas.ConversationResponse(
+        id=conversation.id,
+        other_user_id=other.id,
+        other_username=other.username,
+        last_message_at=last_message_at,
+    )
+
+
+@app.post("/conversations", response_model=schemas.ConversationResponse)
+def start_conversation(
+    conversation_in: schemas.ConversationCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if conversation_in.user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot start a conversation with yourself",
+        )
+
+    user_not_found = HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="User not found",
+    )
+    if crud.get_user_by_id(db, conversation_in.user_id) is None:
+        raise user_not_found
+
+    try:
+        conversation = crud.get_or_create_conversation(
+            db, current_user.id, conversation_in.user_id
+        )
+    except IntegrityError:
+        # The other user was deleted between the check above and the insert.
+        db.rollback()
+        raise user_not_found
+
+    latest = crud.get_recent_private_messages(db, conversation.id, limit=1)
+    last_message_at = latest[0].created_at if latest else None
+    return conversation_response(conversation, current_user.id, last_message_at)
+
+
+@app.get("/conversations", response_model=list[schemas.ConversationResponse])
+def list_conversations(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return [
+        conversation_response(conversation, current_user.id, last_message_at)
+        for conversation, last_message_at in crud.list_conversations_for_user(
+            db, current_user.id
+        )
+    ]
+
+
+@app.get(
+    "/conversations/{conversation_id}/messages",
+    response_model=list[schemas.PrivateMessageResponse],
+)
+def list_private_messages(
+    conversation_id: int,
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 404 rather than 403 for non-participants, so conversation IDs don't leak.
+    conversation = crud.get_conversation_for_user(db, conversation_id, current_user.id)
+    if conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    return crud.get_recent_private_messages(db, conversation.id, limit)
+
 AUTH_TIMEOUT_SECONDS = 10
 
 
