@@ -1,20 +1,17 @@
-const TOKEN_KEY = "socketroom_token";
-const USERNAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
+// SocketRoom frontend.
+//
+// HTTP (fetch) is used for logging in and loading data: history, users,
+// conversations. One WebSocket per tab carries live messages both ways.
+
+// ---------- Page elements ----------
+
 const authView = document.getElementById("auth-view");
 const chatView = document.getElementById("chat-view");
 const loginForm = document.getElementById("login-form");
 const registerForm = document.getElementById("register-form");
 const authError = document.getElementById("auth-error");
 const currentUsername = document.getElementById("current-username");
-const messageList = document.getElementById("message-list");
-const messageForm = document.getElementById("message-form");
-const messageInput = document.getElementById("message-input");
-const sendButton = document.getElementById("send-button");
 const connectionStatus = document.getElementById("connection-status");
-const chatError = document.getElementById("chat-error");
-const historyError = document.getElementById("history-error");
-const historyErrorText = document.getElementById("history-error-text");
-const historyRetry = document.getElementById("history-retry");
 const chatTitle = document.getElementById("chat-title");
 const chatIcon = document.getElementById("chat-icon");
 const sidebarToggle = document.getElementById("sidebar-toggle");
@@ -24,36 +21,81 @@ const conversationList = document.getElementById("conversation-list");
 const conversationEmpty = document.getElementById("conversation-empty");
 const userList = document.getElementById("user-list");
 const userEmpty = document.getElementById("user-empty");
+const messageList = document.getElementById("message-list");
+const historyError = document.getElementById("history-error");
+const historyRetry = document.getElementById("history-retry");
+const chatError = document.getElementById("chat-error");
+const messageForm = document.getElementById("message-form");
+const messageInput = document.getElementById("message-input");
+const sendButton = document.getElementById("send-button");
 
-let currentToken = null;
-let currentUserId = null;
+// ---------- State ----------
 
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 30000;
-const POLICY_VIOLATION_CODE = 1008;
+const TOKEN_KEY = "socketroom_token";
+const RECONNECT_DELAY_MS = 2000;
+const SESSION_EXPIRED = "Your session has expired. Please log in again.";
 
-let socket = null;
-let authenticated = false;
-let reconnectAttempts = 0;
+// The open chat is either General or one private conversation.
+// Its `id` is "general" or the conversation's ID.
+const GENERAL = { id: "general", name: "General" };
+
+let token = sessionStorage.getItem(TOKEN_KEY);
+let currentUser = null;   // { id, username }
+let socket = null;        // the open WebSocket, or null
 let reconnectTimer = null;
-const seenMessageIds = new Set();
-const HISTORY_RETRY_BASE_MS = 1000;
-const HISTORY_MAX_RETRIES = 3;
+let activeChat = GENERAL;
+let users = [];           // everyone registered
+let conversations = [];   // my conversations, newest activity first
+const unread = new Set(); // IDs of chats with unseen messages
 
-let historyGeneration = 0;
-let historyRetryTimer = null;
-let historyRequestSocket = null;
+function privateChat(conversation) {
+    return { id: conversation.id, name: conversation.other_username, conversation };
+}
 
-// The chat shown in the message list: General, or one private conversation.
-// General and private messages are numbered separately, so the message list
-// and seenMessageIds only ever hold one chat at a time.
-const GENERAL_CHAT = { type: "general" };
-let activeChat = GENERAL_CHAT;
-let generalHasUnread = false;
-const conversations = new Map(); // conversation ID -> conversation (+ unread flag)
-let allUsers = [];
-let sidebarLoaded = false;
-let sidebarGeneration = 0;
+// ---------- HTTP ----------
+
+// Calls the API and returns { ok, status, data }. status is 0 if the server
+// could not be reached.
+async function api(path, { method = "GET", body } = {}) {
+    const headers = {};
+    if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+    }
+    if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+    }
+    try {
+        const response = await fetch(path, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const data = await response.json().catch(() => null);
+        return { ok: response.ok, status: response.status, data };
+    } catch (error) {
+        return { ok: false, status: 0, data: null };
+    }
+}
+
+// Turns a failed API result into a message for the user. FastAPI puts the
+// reason in `detail`: a string, or a list of validation errors.
+function errorText(result) {
+    if (result.status === 0) {
+        return "Could not reach the server. Please try again.";
+    }
+    const detail = result.data && result.data.detail;
+    if (typeof detail === "string") {
+        return detail;
+    }
+    if (Array.isArray(detail)) {
+        return detail
+            .map((item) => `${item.loc.at(-1)}: ${item.msg.replace(/^Value error, /, "")}`)
+            .join(". ");
+    }
+    return "Something went wrong. Please try again.";
+}
+
+// ---------- Logging in and out ----------
 
 function showView(name) {
     authView.hidden = name !== "auth";
@@ -63,137 +105,66 @@ function showView(name) {
 function showForm(name) {
     loginForm.hidden = name !== "login";
     registerForm.hidden = name !== "register";
-    clearError();
+    showAuthError("");
 }
 
-function showError(message) {
+function showAuthError(message) {
     authError.textContent = message;
-    authError.hidden = false;
+    authError.hidden = !message;
 }
 
-function clearError() {
-    authError.textContent = "";
-    authError.hidden = true;
-}
-
-function loadStoredToken() {
-    try {
-        return sessionStorage.getItem(TOKEN_KEY);
-    } catch (error) {
-        return null;
-    }
-}
-
-function saveToken(token) {
-    currentToken = token;
-    try {
-        sessionStorage.setItem(TOKEN_KEY, token);
-    } catch (error) {
-        // Token stays in memory only if storage is unavailable.
-    }
-}
-
-function clearToken() {
-    currentToken = null;
-    try {
-        sessionStorage.removeItem(TOKEN_KEY);
-    } catch (error) {
-        // Nothing to clear if storage is unavailable.
-    }
-}
-
-async function apiRequest(path, { method = "GET", body, token } = {}) {
-    const headers = {};
-    if (body !== undefined) {
-        headers["Content-Type"] = "application/json";
-    }
-    if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    let response;
-    try {
-        response = await fetch(path, {
-            method,
-            headers,
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-        });
-    } catch (error) {
-        return { ok: false, status: 0, data: null };
-    }
-
-    let data = null;
-    try {
-        data = await response.json();
-    } catch (error) {
-        data = null;
-    }
-    return { ok: response.ok, status: response.status, data };
-}
-
-function validationMessage(data) {
-    if (data && Array.isArray(data.detail)) {
-        return data.detail
-            .map((item) => {
-                const field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : "input";
-                return `${field}: ${String(item.msg).replace(/^Value error, /, "")}`;
-            })
-            .join(". ");
-    }
-    return "Some of the information you entered is invalid.";
-}
-
-function describeError(result) {
-    if (result.status === 0) {
-        return "Could not reach the server. Please try again.";
-    }
-    if (result.status === 401) {
-        return "Invalid username or password.";
-    }
-    if (result.status === 409) {
-        return "That username is already taken.";
-    }
-    if (result.status === 422) {
-        return validationMessage(result.data);
-    }
-    return "Something went wrong. Please try again.";
-}
-
-async function login(username, password) {
-    const result = await apiRequest("/auth/login", {
+async function logIn(username, password) {
+    const result = await api("/auth/login", {
         method: "POST",
         body: { username, password },
     });
     if (!result.ok) {
-        showError(describeError(result));
-        return false;
+        showAuthError(errorText(result));
+        return;
     }
-    saveToken(result.data.access_token);
-    return true;
+    token = result.data.access_token;
+    sessionStorage.setItem(TOKEN_KEY, token);
+    loginForm.reset();
+    registerForm.reset();
+    await enterChat();
 }
 
 async function enterChat() {
-    const result = await apiRequest("/auth/me", { token: currentToken });
-
+    const result = await api("/auth/me");
     if (!result.ok) {
-        if (result.status === 401) {
-            clearToken();
-        }
-        showForm("login");
-        showView("auth");
-        if (result.status !== 401) {
-            showError(describeError(result));
-        }
+        logOut(result.status === 401 ? "" : errorText(result));
         return;
     }
-
-    currentUsername.textContent = result.data.username;
-    currentUserId = result.data.id;
+    currentUser = result.data;
+    currentUsername.textContent = currentUser.username;
     showView("chat");
-    startChat();
+    showChatHeader();
+    renderSidebar();
+    // History and the sidebar are loaded once the WebSocket says auth_ok.
+    connect();
 }
 
-function setStatus(text, state = "disconnected") {
+function logOut(message = "") {
+    clearTimeout(reconnectTimer);
+    closeSocket();
+    token = null;
+    sessionStorage.removeItem(TOKEN_KEY);
+    currentUser = null;
+    users = [];
+    conversations = [];
+    unread.clear();
+    activeChat = GENERAL;
+    messageList.replaceChildren();
+    renderSidebar();
+    setStatus("Disconnected", "disconnected");
+    showForm("login");
+    showView("auth");
+    showAuthError(message);
+}
+
+// ---------- WebSocket ----------
+
+function setStatus(text, state) {
     connectionStatus.textContent = text;
     connectionStatus.className = `status-pill status-pill--${state}`;
 }
@@ -203,40 +174,118 @@ function setSendingEnabled(enabled) {
     sendButton.disabled = !enabled;
 }
 
+// Closes the socket on purpose. Setting `socket` to null first tells the
+// close handler below not to reconnect.
+function closeSocket() {
+    const ws = socket;
+    socket = null;
+    if (ws) {
+        ws.close();
+    }
+}
+
+function connect() {
+    closeSocket();
+    setStatus("Connecting...", "connecting");
+    setSendingEnabled(false);
+
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${scheme}//${location.host}/ws`);
+    socket = ws;
+
+    // Step 1: the first frame we send must be our token.
+    ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({ type: "auth", data: { token } }));
+    });
+
+    // Step 2: everything the server sends arrives here.
+    ws.addEventListener("message", (event) => {
+        if (ws === socket) {
+            handleFrame(JSON.parse(event.data));
+        }
+    });
+
+    ws.addEventListener("close", (event) => {
+        if (ws !== socket) {
+            return; // We closed it ourselves (log out, or a new connection).
+        }
+        socket = null;
+        setSendingEnabled(false);
+        // 1008: the token was rejected or has expired.
+        if (event.code === 1008) {
+            logOut(SESSION_EXPIRED);
+            return;
+        }
+        // Anything else (server restart, network drop): try again shortly.
+        setStatus("Disconnected. Reconnecting...", "disconnected");
+        reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
+    });
+}
+
+function handleFrame(frame) {
+    if (frame.type === "auth_ok") {
+        setStatus("Connected", "connected");
+        setSendingEnabled(true);
+        clearChatError();
+        messageInput.focus();
+        // (Re)load everything, in case we missed messages while disconnected.
+        loadHistory();
+        loadSidebar();
+    } else if (frame.type === "message") {
+        receiveMessage(GENERAL.id, frame.data);
+    } else if (frame.type === "private_message") {
+        receiveMessage(frame.data.conversation_id, frame.data);
+    } else if (frame.type === "error") {
+        showChatError(frame.content);
+    }
+}
+
+function receiveMessage(chatId, message) {
+    if (chatId === activeChat.id) {
+        appendMessage(message);
+    } else if (message.sender_id !== currentUser.id) {
+        unread.add(chatId);
+    }
+
+    if (chatId !== GENERAL.id) {
+        const conversation = conversations.find((c) => c.id === chatId);
+        if (!conversation) {
+            loadSidebar(); // Someone started a new conversation with us.
+            return;
+        }
+        // Newest activity first: move this conversation to the top.
+        conversations = [conversation, ...conversations.filter((c) => c !== conversation)];
+    }
+    renderSidebar();
+}
+
+function sendMessage(content) {
+    const frame =
+        activeChat.id === GENERAL.id
+            ? { type: "message", content }
+            : { type: "private_message", conversation_id: activeChat.id, content };
+    socket.send(JSON.stringify(frame));
+}
+
+// ---------- Messages ----------
+
 function showChatError(message) {
     chatError.textContent = message;
     chatError.hidden = false;
 }
 
 function clearChatError() {
-    chatError.textContent = "";
     chatError.hidden = true;
 }
 
-function buildSocketUrl() {
-    const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${scheme}//${window.location.host}/ws`;
-}
-
-function parseTimestamp(value) {
-    if (typeof value !== "string") {
-        return null;
-    }
-    let text = value.replace(/(\.\d{3})\d+/, "$1");
-    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
-        text += "Z";
-    }
-    const date = new Date(text);
-    return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function formatTimestamp(value) {
-    const date = parseTimestamp(value);
-    return date ? date.toLocaleString() : "";
+function formatTime(value) {
+    // The server sends UTC times without a time zone, sometimes with
+    // microseconds. Keep up to milliseconds and mark them as UTC ("Z").
+    return new Date(value.slice(0, 23) + "Z").toLocaleString();
 }
 
 function buildMessageElement(message) {
-    const isOwn = currentUserId !== null && message.sender_id === currentUserId;
+    const isOwn = message.sender_id === currentUser.id;
 
     const item = document.createElement("li");
     item.className = `message ${isOwn ? "message--own" : "message--other"}`;
@@ -249,9 +298,10 @@ function buildMessageElement(message) {
     sender.textContent = message.sender_username;
     const time = document.createElement("time");
     time.className = "message__time";
-    time.textContent = formatTimestamp(message.created_at);
+    time.textContent = formatTime(message.created_at);
     meta.append(sender, " ", time);
 
+    // textContent (never innerHTML) so messages can't inject HTML.
     const bubble = document.createElement("p");
     bubble.className = "message__bubble";
     bubble.textContent = message.content;
@@ -260,417 +310,133 @@ function buildMessageElement(message) {
     return item;
 }
 
-function insertMessage(message) {
-    if (!message || typeof message.id !== "number" || seenMessageIds.has(message.id)) {
+function isShown(message) {
+    return messageList.querySelector(`[data-message-id="${message.id}"]`) !== null;
+}
+
+function appendMessage(message) {
+    if (isShown(message)) {
         return;
     }
-    seenMessageIds.add(message.id);
-
     const nearBottom =
         messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 40;
-
-    const item = buildMessageElement(message);
-    let node = messageList.lastElementChild;
-    while (node && Number(node.dataset.messageId) > message.id) {
-        node = node.previousElementSibling;
-    }
-    if (node) {
-        node.after(item);
-    } else {
-        messageList.prepend(item);
-    }
-
+    messageList.append(buildMessageElement(message));
     if (nearBottom) {
         messageList.scrollTop = messageList.scrollHeight;
     }
 }
 
-function showHistoryError(message, canRetry) {
-    historyErrorText.textContent = message;
-    historyRetry.hidden = !canRetry;
-    historyError.hidden = false;
-}
-
-function clearHistoryError() {
-    historyErrorText.textContent = "";
-    historyRetry.hidden = true;
-    historyError.hidden = true;
-}
-
-function cancelHistoryLoad() {
-    historyGeneration += 1;
-    historyRequestSocket = null;
-    clearTimeout(historyRetryTimer);
-    historyRetryTimer = null;
-    clearHistoryError();
-}
-
-function isRetryableHistoryFailure(result) {
-    return result.status === 0 || result.status >= 500;
-}
-
-function historyPath() {
-    if (activeChat.type === "private") {
-        return `/conversations/${activeChat.conversationId}/messages?limit=100`;
-    }
-    return "/messages?limit=100";
-}
-
-async function loadHistory(attempt = 0) {
-    const ws = socket;
-    if (!ws || historyRequestSocket === ws) {
-        return;
-    }
-
-    const generation = ++historyGeneration;
-    historyRequestSocket = ws;
-    clearTimeout(historyRetryTimer);
-    historyRetryTimer = null;
-
-    if (attempt === 0) {
-        clearHistoryError();
-    }
-
-    const result = await apiRequest(historyPath(), { token: currentToken });
-
-    // Only clear the marker if no newer load (e.g. after a chat switch) owns it.
-    if (historyRequestSocket === ws && generation === historyGeneration) {
-        historyRequestSocket = null;
-    }
-
-    if (ws !== socket || generation !== historyGeneration) {
-        return;
-    }
-
-    if (result.ok) {
-        clearHistoryError();
-        if (Array.isArray(result.data)) {
-            result.data.forEach((message) => insertMessage(message));
-        }
-        return;
-    }
-
-    if (result.status === 401) {
-        handleAuthFailure();
-        return;
-    }
-
-    if (isRetryableHistoryFailure(result) && attempt < HISTORY_MAX_RETRIES) {
-        const delay = HISTORY_RETRY_BASE_MS * 2 ** attempt;
-
-        showHistoryError(
-            `Could not load message history. Retrying in ${Math.ceil(delay / 1000)}s...`,
-            false
-        );
-
-        historyRetryTimer = setTimeout(() => {
-            historyRetryTimer = null;
-            if (ws === socket && generation === historyGeneration) {
-                loadHistory(attempt + 1);
-            }
-        }, delay);
-
-        return;
-    }
-
-    showHistoryError("Could not load message history.", true);
-}
-
-function handleSocketMessage(raw) {
-    let frame;
-    try {
-        frame = JSON.parse(raw);
-    } catch (error) {
-        return;
-    }
-    if (!frame || typeof frame !== "object") {
-        return;
-    }
-
-    if (frame.type === "auth_ok") {
-        authenticated = true;
-        reconnectAttempts = 0;
-        setStatus("Connected", "connected");
-        setSendingEnabled(true);
-        clearChatError();
-        messageInput.focus();
-        loadHistory();
-        loadSidebar();
-    } else if (frame.type === "message") {
-        if (activeChat.type === "general") {
-            insertMessage(frame.data);
-        } else if (frame.data && frame.data.sender_id !== currentUserId) {
-            generalHasUnread = true;
-            renderSidebar();
-        }
-    } else if (frame.type === "private_message") {
-        handlePrivateMessage(frame.data);
-    } else if (frame.type === "error") {
-        showChatError(typeof frame.content === "string" ? frame.content : "Something went wrong.");
-    }
-}
-
-function scheduleReconnect() {
-    if (reconnectTimer !== null) {
-        return;
-    }
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
-    const totalDelay = Math.round(delay + Math.random() * 0.3 * delay);
-    reconnectAttempts += 1;
-    setStatus(`Disconnected. Reconnecting in ${Math.ceil(totalDelay / 1000)}s...`);
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connectSocket();
-    }, totalDelay);
-}
-
-function connectSocket() {
-    if (!currentToken) {
-        return;
-    }
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    authenticated = false;
-    setSendingEnabled(false);
-    setStatus(reconnectAttempts === 0 ? "Connecting..." : "Reconnecting...", "connecting");
-
-    const ws = new WebSocket(buildSocketUrl());
-    socket = ws;
-
-    ws.addEventListener("open", () => {
-        if (ws !== socket) {
-            return;
-        }
-        ws.send(JSON.stringify({ type: "auth", data: { token: currentToken } }));
-    });
-
-    ws.addEventListener("message", (event) => {
-        if (ws !== socket) {
-            return;
-        }
-        handleSocketMessage(event.data);
-    });
-
-    ws.addEventListener("close", (event) => {
-        if (ws !== socket) {
-            return;
-        }
-        socket = null;
-        authenticated = false;
-        cancelHistoryLoad();
-        setSendingEnabled(false);
-        if (event.code === POLICY_VIOLATION_CODE) {
-            handleAuthFailure();
-            return;
-        }
-        scheduleReconnect();
-    });
-}
-
-function stopChat() {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    reconnectAttempts = 0;
-    authenticated = false;
-    setSendingEnabled(false);
-
-    const ws = socket;
-    socket = null;
-    if (ws) {
-        ws.close();
-    }
-
+async function loadHistory() {
+    const chat = activeChat;
     messageList.replaceChildren();
-    seenMessageIds.clear();
-    clearChatError();
-    cancelHistoryLoad();
-    setStatus("Disconnected");
+    historyError.hidden = true;
 
-    activeChat = GENERAL_CHAT;
-    generalHasUnread = false;
-    conversations.clear();
-    allUsers = [];
-    sidebarLoaded = false;
-    sidebarGeneration += 1;
-    updateChatHeader();
-    renderSidebar();
-    setSidebarOpen(false);
+    const path =
+        chat.id === GENERAL.id
+            ? "/messages?limit=100"
+            : `/conversations/${chat.id}/messages?limit=100`;
+    const result = await api(path);
+
+    if (chat !== activeChat) {
+        return; // The user switched chats while this was loading.
+    }
+    if (result.status === 401) {
+        logOut(SESSION_EXPIRED);
+        return;
+    }
+    if (!result.ok) {
+        historyError.hidden = false;
+        return;
+    }
+    // Live messages may have arrived while we were loading; they are newer,
+    // so put the history in front of them and skip any duplicates.
+    const older = result.data.filter((message) => !isShown(message));
+    messageList.prepend(...older.map(buildMessageElement));
+    messageList.scrollTop = messageList.scrollHeight;
 }
 
-// ---------- Private chats and sidebar ----------
+// ---------- Chats and sidebar ----------
 
-function isActiveConversation(conversationId) {
-    return activeChat.type === "private" && activeChat.conversationId === conversationId;
-}
-
-function updateChatHeader() {
-    const isPrivate = activeChat.type === "private";
-    chatIcon.textContent = isPrivate ? "@" : "#";
-    chatTitle.textContent = isPrivate ? activeChat.otherUsername : "General";
-    messageInput.placeholder = isPrivate
-        ? `Message @${activeChat.otherUsername}`
-        : "Message #General";
+function showChatHeader() {
+    const isGeneral = activeChat.id === GENERAL.id;
+    chatIcon.textContent = isGeneral ? "#" : "@";
+    chatTitle.textContent = activeChat.name;
+    messageInput.placeholder = isGeneral ? "Message #General" : `Message @${activeChat.name}`;
 }
 
 function setSidebarOpen(open) {
     chatView.classList.toggle("chat--sidebar-open", open);
     sidebarToggle.setAttribute("aria-expanded", String(open));
-    sidebarToggle.setAttribute("aria-label", open ? "Hide chats" : "Show chats");
 }
 
 function openChat(chat) {
-    const sameChat =
-        chat.type === activeChat.type &&
-        (chat.type === "general" || chat.conversationId === activeChat.conversationId);
     setSidebarOpen(false);
-    if (sameChat) {
+    if (chat.id === activeChat.id) {
         return;
     }
-
     activeChat = chat;
-    if (chat.type === "general") {
-        generalHasUnread = false;
-    } else {
-        const conversation = conversations.get(chat.conversationId);
-        if (conversation) {
-            conversation.unread = false;
-        }
-    }
-
-    cancelHistoryLoad();
-    messageList.replaceChildren();
-    seenMessageIds.clear();
+    unread.delete(chat.id);
     clearChatError();
-    updateChatHeader();
+    showChatHeader();
     renderSidebar();
-
-    if (socket && authenticated) {
-        loadHistory();
-        messageInput.focus();
-    }
-}
-
-function openPrivateChat(conversation) {
-    openChat({
-        type: "private",
-        conversationId: conversation.id,
-        otherUsername: conversation.other_username,
-    });
-}
-
-function handlePrivateMessage(message) {
-    if (!message || typeof message.conversation_id !== "number") {
-        return;
-    }
-
-    if (isActiveConversation(message.conversation_id)) {
-        insertMessage(message);
-    }
-
-    const conversation = conversations.get(message.conversation_id);
-    if (!conversation) {
-        // Someone started a new conversation with us: refresh the list.
-        loadSidebar();
-        return;
-    }
-
-    conversation.last_message_at = message.created_at;
-    if (!isActiveConversation(message.conversation_id) && message.sender_id !== currentUserId) {
-        conversation.unread = true;
-    }
-    renderSidebar();
+    loadHistory();
+    messageInput.focus();
 }
 
 async function startConversation(userId) {
-    clearChatError();
-    const token = currentToken;
-    const result = await apiRequest("/conversations", {
+    const result = await api("/conversations", {
         method: "POST",
         body: { user_id: userId },
-        token,
     });
-    if (token !== currentToken) {
-        return; // Logged out while the request was in flight.
-    }
-
-    if (!result.ok) {
-        if (result.status === 401) {
-            handleAuthFailure();
-        } else if (result.status === 0) {
-            showChatError("Could not reach the server. Please try again.");
-        } else {
-            showChatError("Could not start the conversation.");
-        }
+    if (result.status === 401) {
+        logOut(SESSION_EXPIRED);
         return;
     }
-
-    let conversation = conversations.get(result.data.id);
-    if (!conversation) {
-        conversation = { ...result.data, unread: false };
-        conversations.set(conversation.id, conversation);
+    if (!result.ok) {
+        showChatError(errorText(result));
+        return;
     }
-    openPrivateChat(conversation);
+    const conversation = result.data;
+    if (!conversations.some((c) => c.id === conversation.id)) {
+        conversations.unshift(conversation);
+    }
+    openChat(privateChat(conversation));
 }
 
 async function loadSidebar() {
-    const generation = ++sidebarGeneration;
-    const token = currentToken;
+    const requestToken = token;
     const [usersResult, conversationsResult] = await Promise.all([
-        apiRequest("/users", { token }),
-        apiRequest("/conversations", { token }),
+        api("/users"),
+        api("/conversations"),
     ]);
-    if (generation !== sidebarGeneration) {
-        return; // A newer load started, or the user logged out.
+    if (token !== requestToken) {
+        return; // Logged out while loading.
     }
-
     if (usersResult.status === 401 || conversationsResult.status === 401) {
-        handleAuthFailure();
+        logOut(SESSION_EXPIRED);
         return;
     }
     if (!usersResult.ok || !conversationsResult.ok) {
         showChatError("Could not load your conversations.");
         return;
     }
-
-    const fresh = new Map();
-    for (const item of conversationsResult.data) {
-        const old = conversations.get(item.id);
-        // After a reconnect, anything that changed while we were away is unread.
-        const changed = !old || old.last_message_at !== item.last_message_at;
-        const unread =
-            Boolean(old && old.unread) ||
-            (sidebarLoaded && changed && !isActiveConversation(item.id));
-        fresh.set(item.id, { ...item, unread });
+    users = usersResult.data;
+    conversations = conversationsResult.data;
+    // The server only lists conversations that have messages. Keep the open
+    // one visible even if nothing has been sent in it yet.
+    const open = activeChat.conversation;
+    if (open && !conversations.some((c) => c.id === open.id)) {
+        conversations.unshift(open);
     }
-    // Keep conversations opened here that have no messages yet; the server
-    // only lists conversations with at least one message.
-    for (const [id, old] of conversations) {
-        if (!fresh.has(id) && old.last_message_at === null) {
-            fresh.set(id, old);
-        }
-    }
-
-    conversations.clear();
-    fresh.forEach((conversation, id) => conversations.set(id, conversation));
-    allUsers = usersResult.data;
-    sidebarLoaded = true;
     renderSidebar();
 }
 
-function activityTime(conversation) {
-    const date = parseTimestamp(conversation.last_message_at);
-    // Conversations with no messages yet were just opened: show them first.
-    return date ? date.getTime() : Number.MAX_SAFE_INTEGER;
-}
-
-function buildSidebarItem({ icon, name, active = false, unread = false, onClick }) {
-    const item = document.createElement("li");
+function buildSidebarItem(icon, name, chatId, onClick) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = unread ? "sidebar__item sidebar__item--unread" : "sidebar__item";
-    if (active) {
-        button.setAttribute("aria-current", "true");
-    }
+    button.className = "sidebar__item";
+    button.setAttribute("aria-current", String(chatId === activeChat.id));
+    button.classList.toggle("sidebar__item--unread", unread.has(chatId));
 
     const iconElement = document.createElement("span");
     iconElement.className = "sidebar__icon";
@@ -680,198 +446,104 @@ function buildSidebarItem({ icon, name, active = false, unread = false, onClick 
     const nameElement = document.createElement("span");
     nameElement.className = "sidebar__name";
     nameElement.textContent = name;
-
     button.append(iconElement, nameElement);
 
-    if (unread) {
+    if (unread.has(chatId)) {
         const dot = document.createElement("span");
         dot.className = "sidebar__unread";
         const label = document.createElement("span");
-        label.className = "visually-hidden";
+        label.className = "visually-hidden"; // read by screen readers only
         label.textContent = "unread messages";
         dot.append(label);
         button.append(dot);
     }
 
     button.addEventListener("click", onClick);
+    const item = document.createElement("li");
     item.append(button);
     return item;
 }
 
 function renderSidebar() {
-    if (activeChat.type === "general") {
-        generalButton.setAttribute("aria-current", "true");
-    } else {
-        generalButton.removeAttribute("aria-current");
-    }
-    generalButton.classList.toggle("sidebar__item--unread", generalHasUnread);
-    generalUnread.hidden = !generalHasUnread;
+    generalButton.setAttribute("aria-current", String(activeChat.id === GENERAL.id));
+    generalButton.classList.toggle("sidebar__item--unread", unread.has(GENERAL.id));
+    generalUnread.hidden = !unread.has(GENERAL.id);
 
-    const sorted = [...conversations.values()].sort(
-        (a, b) => activityTime(b) - activityTime(a)
-    );
     conversationList.replaceChildren(
-        ...sorted.map((conversation) =>
-            buildSidebarItem({
-                icon: "@",
-                name: conversation.other_username,
-                active: isActiveConversation(conversation.id),
-                unread: conversation.unread,
-                onClick: () => openPrivateChat(conversation),
-            })
+        ...conversations.map((c) =>
+            buildSidebarItem("@", c.other_username, c.id, () => openChat(privateChat(c)))
         )
     );
-    conversationEmpty.hidden = !sidebarLoaded || sorted.length > 0;
+    conversationEmpty.hidden = conversations.length > 0;
 
-    // "Start a chat" lists everyone we don't already have a conversation with.
-    const inConversation = new Set(sorted.map((conversation) => conversation.other_user_id));
-    const others = allUsers.filter(
-        (user) => user.id !== currentUserId && !inConversation.has(user.id)
-    );
+    // "Start a chat" lists everyone we don't have a conversation with yet.
+    const talkingTo = new Set(conversations.map((c) => c.other_user_id));
+    const others = users.filter((u) => u.id !== currentUser.id && !talkingTo.has(u.id));
     userList.replaceChildren(
-        ...others.map((user) =>
-            buildSidebarItem({
-                icon: user.username.charAt(0).toUpperCase(),
-                name: user.username,
-                onClick: () => startConversation(user.id),
-            })
+        ...others.map((u) =>
+            buildSidebarItem(u.username[0].toUpperCase(), u.username, null, () =>
+                startConversation(u.id)
+            )
         )
     );
-    userEmpty.hidden = !sidebarLoaded || others.length > 0;
+    userEmpty.hidden = others.length > 0;
 
-    const anyUnread = generalHasUnread || sorted.some((conversation) => conversation.unread);
-    sidebarToggle.classList.toggle("sidebar-toggle--unread", anyUnread);
+    sidebarToggle.classList.toggle("sidebar-toggle--unread", unread.size > 0);
 }
 
-function startChat() {
-    stopChat();
-    connectSocket();
-}
-
-function handleAuthFailure() {
-    stopChat();
-    clearToken();
-    showForm("login");
-    showView("auth");
-    showError("Your session has expired. Please log in again.");
-}
-
-messageForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-
-    const content = messageInput.value.trim();
-    if (!content || !authenticated || !socket || socket.readyState !== WebSocket.OPEN) {
-        return;
-    }
-
-    clearChatError();
-    const frame =
-        activeChat.type === "private"
-            ? { type: "private_message", conversation_id: activeChat.conversationId, content }
-            : { type: "message", content };
-    socket.send(JSON.stringify(frame));
-    messageInput.value = "";
-});
-
-generalButton.addEventListener("click", () => {
-    openChat(GENERAL_CHAT);
-});
-
-sidebarToggle.addEventListener("click", () => {
-    setSidebarOpen(!chatView.classList.contains("chat--sidebar-open"));
-});
-
-document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && chatView.classList.contains("chat--sidebar-open")) {
-        setSidebarOpen(false);
-        sidebarToggle.focus();
-    }
-});
-
-historyRetry.addEventListener("click", () => {
-    if (socket && authenticated) {
-        loadHistory();
-    }
-});
+// ---------- Event listeners ----------
 
 loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    clearError();
-
-    const submitButton = loginForm.querySelector("button[type='submit']");
-    submitButton.disabled = true;
-
-    const username = document.getElementById("login-username").value;
-    const password = document.getElementById("login-password").value;
-
-    try {
-        if (await login(username, password)) {
-            loginForm.reset();
-            await enterChat();
-        }
-    } finally {
-        submitButton.disabled = false;
-    }
+    await logIn(
+        document.getElementById("login-username").value,
+        document.getElementById("login-password").value
+    );
 });
 
 registerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    clearError();
-
-    const submitButton = registerForm.querySelector("button[type='submit']");
-    submitButton.disabled = true;
-
     const username = document.getElementById("register-username").value.trim();
     const password = document.getElementById("register-password").value;
+    const result = await api("/users", { method: "POST", body: { username, password } });
+    if (!result.ok) {
+        showAuthError(errorText(result));
+        return;
+    }
+    await logIn(username, password);
+});
 
-    try {
-        if (!USERNAME_PATTERN.test(username)) {
-            showError("Username: use only letters, numbers, underscores, hyphens and periods.");
-            return;
-        }
+document.getElementById("show-register").addEventListener("click", () => showForm("register"));
+document.getElementById("show-login").addEventListener("click", () => showForm("login"));
+document.getElementById("logout-button").addEventListener("click", () => logOut());
 
-        const result = await apiRequest("/users", {
-            method: "POST",
-            body: { username, password },
-        });
+messageForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const content = messageInput.value.trim();
+    if (!content || !socket || messageInput.disabled) {
+        return;
+    }
+    clearChatError();
+    sendMessage(content);
+    messageInput.value = "";
+});
 
-        if (!result.ok) {
-            showError(describeError(result));
-            return;
-        }
-
-        if (await login(username, password)) {
-            registerForm.reset();
-            await enterChat();
-        }
-    } finally {
-        submitButton.disabled = false;
+generalButton.addEventListener("click", () => openChat(GENERAL));
+historyRetry.addEventListener("click", () => loadHistory());
+sidebarToggle.addEventListener("click", () => {
+    setSidebarOpen(!chatView.classList.contains("chat--sidebar-open"));
+});
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        setSidebarOpen(false);
     }
 });
 
-document.getElementById("show-register").addEventListener("click", () => {
-    showForm("register");
-});
+// ---------- Start ----------
 
-document.getElementById("show-login").addEventListener("click", () => {
-    showForm("login");
-});
-
-document.getElementById("logout-button").addEventListener("click", () => {
-    stopChat();
-    clearToken();
+if (token) {
+    enterChat(); // Still logged in from earlier in this tab.
+} else {
     showForm("login");
     showView("auth");
-});
-
-async function init() {
-    currentToken = loadStoredToken();
-    if (currentToken) {
-        await enterChat();
-    } else {
-        showForm("login");
-        showView("auth");
-    }
 }
-
-init();
