@@ -86,6 +86,12 @@ class Conversation(Base):
         nullable=False,
     )
 
+    user_low: Mapped[User] = relationship(foreign_keys=[user_low_id], lazy="joined")
+    user_high: Mapped[User] = relationship(foreign_keys=[user_high_id], lazy="joined")
+
+    def other_user(self, user_id: int) -> User:
+        return self.user_high if user_id == self.user_low_id else self.user_low
+
 
 class PrivateMessage(Base):
     __tablename__ = "private_messages"
