@@ -1,6 +1,8 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+import jwt
 from fastapi import (
     Depends,
     FastAPI,
@@ -187,13 +189,19 @@ def list_private_messages(
 AUTH_TIMEOUT_SECONDS = 10
 
 
-def authenticate_token(token: str) -> tuple[int, str] | None:
+def authenticate_token(token: str) -> tuple[int, str, float] | None:
+    """Returns (user ID, username, token expiry as a Unix timestamp)."""
+    try:
+        expires_at = float(security.decode_access_token(token)["exp"])
+    except jwt.InvalidTokenError:
+        return None
+
     db = SessionLocal()
     try:
         user = get_user_from_token(db, token)
         if user is None:
             return None
-        return user.id, user.username
+        return user.id, user.username, expires_at
     finally:
         db.close()
 
@@ -293,15 +301,27 @@ async def websocket_chat(websocket: WebSocket):
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
 
-        user_id, username = identity
+        user_id, username, expires_at = identity
         await websocket.send_json(
             {"type": "auth_ok", "data": {"user_id": user_id, "username": username}}
         )
         manager.connect(websocket, user_id)
 
         while True:
+            # The connection is only valid while its token is: wait for the next
+            # frame no longer than the token's remaining lifetime, then close
+            # with 1008 so the client asks the user to log in again.
+            remaining = expires_at - time.time()
+            if remaining <= 0:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
             try:
-                frame = await websocket.receive_json()
+                frame = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
             except (ValueError, KeyError, TypeError):
                 await websocket.send_json(
                     {"type": "error", "content": "Invalid message format"}
