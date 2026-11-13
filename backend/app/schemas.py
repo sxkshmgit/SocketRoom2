@@ -57,3 +57,25 @@ class MessageResponse(BaseModel):
     sender_username: str
     content: str
     created_at: datetime
+
+
+class ConversationCreate(BaseModel):
+    user_id: int
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    other_user_id: int
+    other_username: str
+    last_message_at: datetime | None = None
+
+
+class PrivateMessageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    conversation_id: int
+    sender_id: int
+    sender_username: str
+    content: str
+    created_at: datetime
