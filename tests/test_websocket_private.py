@@ -1,39 +1,15 @@
-import time
-from contextlib import contextmanager
-
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app import crud
-from backend.app import main as main_module
-
-
-def register_and_login(client, username):
-    password = f"{username}-password"
-    response = client.post("/users", json={"username": username, "password": password})
-    user_id = response.json()["id"]
-    login_response = client.post(
-        "/auth/login", json={"username": username, "password": password}
-    )
-    return user_id, login_response.json()["access_token"]
-
-
-def auth_headers(token):
-    return {"Authorization": f"Bearer {token}"}
-
-
-@contextmanager
-def connect_authenticated(client, token):
-    with client.websocket_connect("/ws") as ws:
-        ws.send_json({"type": "auth", "data": {"token": token}})
-        assert ws.receive_json()["type"] == "auth_ok"
-        yield ws
-
-
-def assert_error(ws, text):
-    frame = ws.receive_json()
-    assert frame["type"] == "error"
-    assert frame["content"] == text
+from backend.app.connection_manager import manager
+from tests.helpers import (
+    assert_error,
+    auth_headers,
+    connect_authenticated,
+    register_and_login,
+    wait_for_connections,
+)
 
 
 def send_private(ws, conversation_id, content):
@@ -200,23 +176,12 @@ def test_save_failure_returns_error(client, users, conversation_id, monkeypatch)
 # ---------- connection manager ----------
 
 def test_manager_tracks_user_for_each_socket(client, users):
-    from backend.app.connection_manager import manager
-
     alice_id, alice_token = users["alice"]
     bob_id, bob_token = users["bob"]
 
-    expected = sorted([alice_id, bob_id])
     with connect_authenticated(client, alice_token), \
             connect_authenticated(client, bob_token):
-        # The server registers the socket just after sending auth_ok, so poll briefly.
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if sorted(manager.active_connections.values()) == expected:
-                break
-            time.sleep(0.01)
-        assert sorted(manager.active_connections.values()) == expected
+        wait_for_connections(2)
+        assert sorted(manager.active_connections.values()) == sorted([alice_id, bob_id])
 
-    wait_until_empty = time.monotonic() + 2.0
-    while manager.active_connections and time.monotonic() < wait_until_empty:
-        time.sleep(0.01)
-    assert manager.active_connections == {}
+    wait_for_connections(0)
