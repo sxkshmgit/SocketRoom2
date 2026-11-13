@@ -213,6 +213,57 @@ def save_chat_message(user_id: int, content: str) -> dict | None:
         db.close()
 
 
+def save_private_message(
+    sender_id: int, conversation_id: int, content: str
+) -> tuple[dict, set[int]] | str:
+    """Save a private message if the sender belongs to the conversation.
+
+    Returns (payload, participant IDs) on success, or an error message.
+    """
+    db = SessionLocal()
+    try:
+        conversation = crud.get_conversation_for_user(db, conversation_id, sender_id)
+        if conversation is None:
+            return "Conversation not found"
+        message = crud.create_private_message(db, conversation.id, sender_id, content)
+        payload = schemas.PrivateMessageResponse.model_validate(message).model_dump(
+            mode="json"
+        )
+        return payload, {conversation.user_low_id, conversation.user_high_id}
+    except SQLAlchemyError:
+        db.rollback()
+        return "Message could not be saved"
+    finally:
+        db.close()
+
+
+async def handle_private_message(websocket: WebSocket, user_id: int, frame: dict):
+    conversation_id = frame.get("conversation_id")
+    # bool is a subclass of int, so reject it explicitly.
+    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
+        await websocket.send_json({"type": "error", "content": "Conversation not found"})
+        return
+
+    try:
+        message_in = schemas.MessageCreate(content=frame.get("content"))
+    except ValidationError:
+        await websocket.send_json(
+            {"type": "error", "content": "Message content is invalid"}
+        )
+        return
+
+    result = save_private_message(user_id, conversation_id, message_in.content)
+    if isinstance(result, str):
+        await websocket.send_json({"type": "error", "content": result})
+        return
+
+    payload, participant_ids = result
+    # Both participants, on every open tab (including the sender's own).
+    await manager.send_to_users(
+        participant_ids, {"type": "private_message", "data": payload}
+    )
+
+
 @app.websocket("/ws")
 async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
@@ -246,7 +297,7 @@ async def websocket_chat(websocket: WebSocket):
         await websocket.send_json(
             {"type": "auth_ok", "data": {"user_id": user_id, "username": username}}
         )
-        manager.connect(websocket)
+        manager.connect(websocket, user_id)
 
         while True:
             try:
@@ -255,6 +306,10 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_json(
                     {"type": "error", "content": "Invalid message format"}
                 )
+                continue
+
+            if isinstance(frame, dict) and frame.get("type") == "private_message":
+                await handle_private_message(websocket, user_id, frame)
                 continue
 
             if not isinstance(frame, dict) or frame.get("type") != "message":
