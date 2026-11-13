@@ -53,3 +53,13 @@ def test_login_unknown_username(client):
     )
 
     assert response.status_code == 401
+
+def test_login_ignores_username_case(client):
+    client.post("/users", json={"username": "alice", "password": "alice-password"})
+
+    response = client.post(
+        "/auth/login",
+        json={"username": "ALICE", "password": "alice-password"},
+    )
+
+    assert response.status_code == 200
