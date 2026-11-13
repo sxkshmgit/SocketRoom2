@@ -19,8 +19,8 @@ SocketRoom2 is a learning and portfolio project focused on backend fundamentals,
 - Real-time message broadcasting over a single WebSocket connection.
 - Persistent message storage in SQL Server.
 - Retrieval of recent message history (up to 100 messages per request).
-- Automatic WebSocket reconnection with exponential backoff and jitter.
-- Automatic retries when loading chat history fails, followed by a manual Retry option.
+- Automatic WebSocket reconnection after a dropped connection.
+- A Retry option when loading chat history fails.
 - Username normalization and validation.
 - Different WebSocket close handling for invalid authentication and temporary database errors.
 - Responsive layout: the chat sidebar collapses behind a menu button on narrow screens.
@@ -201,7 +201,7 @@ General and private messages share one WebSocket connection per browser tab.
 6. General messages are broadcast to every connected socket. Private messages are sent only to the sockets of the two participants.
 7. Connected clients render the message if it belongs to the chat currently open, or mark that chat as unread.
 
-The frontend reconnects after unexpected WebSocket closures and then reloads the open chat's history and the conversation list. Invalid authentication closes the connection with code **1008**; a temporary database error during WebSocket authentication uses **1013**, allowing the client to retry without clearing its token.
+The frontend reconnects 2 seconds after an unexpected WebSocket closure and then reloads the open chat's history and the conversation list. Invalid authentication closes the connection with code **1008**; a temporary database error during WebSocket authentication uses **1013**, allowing the client to retry without clearing its token.
 
 ### Private conversations
 
@@ -221,7 +221,7 @@ GET /messages?limit=50
 GET /conversations/7/messages?limit=50
 ~~~
 
-If loading history fails because of a network or server error, the frontend retries a limited number of times with increasing delays. It then displays a manual Retry option.
+If loading history fails, the frontend shows an error with a Retry button.
 
 ## API endpoints
 
@@ -397,7 +397,7 @@ SocketRoom2 is intentionally a small application. Its current design has these l
 - **Recent history only:** the API returns up to 100 recent messages per request. Older-message pagination is not implemented.
 - **No explicit send acknowledgement:** the WebSocket protocol does not provide a client message ID and server acknowledgement for each send. A connection failure at the wrong moment can therefore leave the sender unsure whether a message was saved.
 - **Short sessions, no refresh:** tokens expire after 30 minutes, and the server then closes the WebSocket with code 1008, so users must log in again. There is no token refresh.
-- **Unread markers are not stored:** they are tracked in the browser and reset on page reload. Newly registered users appear in the "Start a chat" list after a reconnect or page reload.
+- **Unread markers are not stored:** they are set only by messages received live, and reset on page reload. Messages that arrive while disconnected appear in history but are not marked unread. Newly registered users appear in the "Start a chat" list after a reconnect or page reload.
 - **No distributed broker:** there is no Redis or other pub/sub layer for coordinating multiple application processes.
 - **Basic abuse protection:** rate limiting, connection caps, user blocking, and production-grade abuse controls are not implemented.
 
