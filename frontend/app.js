@@ -15,6 +15,15 @@ const chatError = document.getElementById("chat-error");
 const historyError = document.getElementById("history-error");
 const historyErrorText = document.getElementById("history-error-text");
 const historyRetry = document.getElementById("history-retry");
+const chatTitle = document.getElementById("chat-title");
+const chatIcon = document.getElementById("chat-icon");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+const generalButton = document.getElementById("general-button");
+const generalUnread = document.getElementById("general-unread");
+const conversationList = document.getElementById("conversation-list");
+const conversationEmpty = document.getElementById("conversation-empty");
+const userList = document.getElementById("user-list");
+const userEmpty = document.getElementById("user-empty");
 
 let currentToken = null;
 let currentUserId = null;
@@ -34,6 +43,17 @@ const HISTORY_MAX_RETRIES = 3;
 let historyGeneration = 0;
 let historyRetryTimer = null;
 let historyRequestSocket = null;
+
+// The chat shown in the message list: General, or one private conversation.
+// General and private messages are numbered separately, so the message list
+// and seenMessageIds only ever hold one chat at a time.
+const GENERAL_CHAT = { type: "general" };
+let activeChat = GENERAL_CHAT;
+let generalHasUnread = false;
+const conversations = new Map(); // conversation ID -> conversation (+ unread flag)
+let allUsers = [];
+let sidebarLoaded = false;
+let sidebarGeneration = 0;
 
 function showView(name) {
     authView.hidden = name !== "auth";
@@ -289,6 +309,13 @@ function isRetryableHistoryFailure(result) {
     return result.status === 0 || result.status >= 500;
 }
 
+function historyPath() {
+    if (activeChat.type === "private") {
+        return `/conversations/${activeChat.conversationId}/messages?limit=100`;
+    }
+    return "/messages?limit=100";
+}
+
 async function loadHistory(attempt = 0) {
     const ws = socket;
     if (!ws || historyRequestSocket === ws) {
@@ -304,9 +331,10 @@ async function loadHistory(attempt = 0) {
         clearHistoryError();
     }
 
-    const result = await apiRequest("/messages?limit=100", { token: currentToken });
+    const result = await apiRequest(historyPath(), { token: currentToken });
 
-    if (historyRequestSocket === ws) {
+    // Only clear the marker if no newer load (e.g. after a chat switch) owns it.
+    if (historyRequestSocket === ws && generation === historyGeneration) {
         historyRequestSocket = null;
     }
 
@@ -367,8 +395,16 @@ function handleSocketMessage(raw) {
         clearChatError();
         messageInput.focus();
         loadHistory();
+        loadSidebar();
     } else if (frame.type === "message") {
-        insertMessage(frame.data);
+        if (activeChat.type === "general") {
+            insertMessage(frame.data);
+        } else if (frame.data && frame.data.sender_id !== currentUserId) {
+            generalHasUnread = true;
+            renderSidebar();
+        }
+    } else if (frame.type === "private_message") {
+        handlePrivateMessage(frame.data);
     } else if (frame.type === "error") {
         showChatError(typeof frame.content === "string" ? frame.content : "Something went wrong.");
     }
@@ -449,6 +485,262 @@ function stopChat() {
     clearChatError();
     cancelHistoryLoad();
     setStatus("Disconnected");
+
+    activeChat = GENERAL_CHAT;
+    generalHasUnread = false;
+    conversations.clear();
+    allUsers = [];
+    sidebarLoaded = false;
+    sidebarGeneration += 1;
+    updateChatHeader();
+    renderSidebar();
+    setSidebarOpen(false);
+}
+
+// ---------- Private chats and sidebar ----------
+
+function isActiveConversation(conversationId) {
+    return activeChat.type === "private" && activeChat.conversationId === conversationId;
+}
+
+function updateChatHeader() {
+    const isPrivate = activeChat.type === "private";
+    chatIcon.textContent = isPrivate ? "@" : "#";
+    chatTitle.textContent = isPrivate ? activeChat.otherUsername : "General";
+    messageInput.placeholder = isPrivate
+        ? `Message @${activeChat.otherUsername}`
+        : "Message #General";
+}
+
+function setSidebarOpen(open) {
+    chatView.classList.toggle("chat--sidebar-open", open);
+    sidebarToggle.setAttribute("aria-expanded", String(open));
+    sidebarToggle.setAttribute("aria-label", open ? "Hide chats" : "Show chats");
+}
+
+function openChat(chat) {
+    const sameChat =
+        chat.type === activeChat.type &&
+        (chat.type === "general" || chat.conversationId === activeChat.conversationId);
+    setSidebarOpen(false);
+    if (sameChat) {
+        return;
+    }
+
+    activeChat = chat;
+    if (chat.type === "general") {
+        generalHasUnread = false;
+    } else {
+        const conversation = conversations.get(chat.conversationId);
+        if (conversation) {
+            conversation.unread = false;
+        }
+    }
+
+    cancelHistoryLoad();
+    messageList.replaceChildren();
+    seenMessageIds.clear();
+    clearChatError();
+    updateChatHeader();
+    renderSidebar();
+
+    if (socket && authenticated) {
+        loadHistory();
+        messageInput.focus();
+    }
+}
+
+function openPrivateChat(conversation) {
+    openChat({
+        type: "private",
+        conversationId: conversation.id,
+        otherUsername: conversation.other_username,
+    });
+}
+
+function handlePrivateMessage(message) {
+    if (!message || typeof message.conversation_id !== "number") {
+        return;
+    }
+
+    if (isActiveConversation(message.conversation_id)) {
+        insertMessage(message);
+    }
+
+    const conversation = conversations.get(message.conversation_id);
+    if (!conversation) {
+        // Someone started a new conversation with us: refresh the list.
+        loadSidebar();
+        return;
+    }
+
+    conversation.last_message_at = message.created_at;
+    if (!isActiveConversation(message.conversation_id) && message.sender_id !== currentUserId) {
+        conversation.unread = true;
+    }
+    renderSidebar();
+}
+
+async function startConversation(userId) {
+    clearChatError();
+    const token = currentToken;
+    const result = await apiRequest("/conversations", {
+        method: "POST",
+        body: { user_id: userId },
+        token,
+    });
+    if (token !== currentToken) {
+        return; // Logged out while the request was in flight.
+    }
+
+    if (!result.ok) {
+        if (result.status === 401) {
+            handleAuthFailure();
+        } else if (result.status === 0) {
+            showChatError("Could not reach the server. Please try again.");
+        } else {
+            showChatError("Could not start the conversation.");
+        }
+        return;
+    }
+
+    let conversation = conversations.get(result.data.id);
+    if (!conversation) {
+        conversation = { ...result.data, unread: false };
+        conversations.set(conversation.id, conversation);
+    }
+    openPrivateChat(conversation);
+}
+
+async function loadSidebar() {
+    const generation = ++sidebarGeneration;
+    const token = currentToken;
+    const [usersResult, conversationsResult] = await Promise.all([
+        apiRequest("/users", { token }),
+        apiRequest("/conversations", { token }),
+    ]);
+    if (generation !== sidebarGeneration) {
+        return; // A newer load started, or the user logged out.
+    }
+
+    if (usersResult.status === 401 || conversationsResult.status === 401) {
+        handleAuthFailure();
+        return;
+    }
+    if (!usersResult.ok || !conversationsResult.ok) {
+        showChatError("Could not load your conversations.");
+        return;
+    }
+
+    const fresh = new Map();
+    for (const item of conversationsResult.data) {
+        const old = conversations.get(item.id);
+        // After a reconnect, anything that changed while we were away is unread.
+        const changed = !old || old.last_message_at !== item.last_message_at;
+        const unread =
+            Boolean(old && old.unread) ||
+            (sidebarLoaded && changed && !isActiveConversation(item.id));
+        fresh.set(item.id, { ...item, unread });
+    }
+    // Keep conversations opened here that have no messages yet; the server
+    // only lists conversations with at least one message.
+    for (const [id, old] of conversations) {
+        if (!fresh.has(id) && old.last_message_at === null) {
+            fresh.set(id, old);
+        }
+    }
+
+    conversations.clear();
+    fresh.forEach((conversation, id) => conversations.set(id, conversation));
+    allUsers = usersResult.data;
+    sidebarLoaded = true;
+    renderSidebar();
+}
+
+function activityTime(conversation) {
+    const date = parseTimestamp(conversation.last_message_at);
+    // Conversations with no messages yet were just opened: show them first.
+    return date ? date.getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+function buildSidebarItem({ icon, name, active = false, unread = false, onClick }) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = unread ? "sidebar__item sidebar__item--unread" : "sidebar__item";
+    if (active) {
+        button.setAttribute("aria-current", "true");
+    }
+
+    const iconElement = document.createElement("span");
+    iconElement.className = "sidebar__icon";
+    iconElement.setAttribute("aria-hidden", "true");
+    iconElement.textContent = icon;
+
+    const nameElement = document.createElement("span");
+    nameElement.className = "sidebar__name";
+    nameElement.textContent = name;
+
+    button.append(iconElement, nameElement);
+
+    if (unread) {
+        const dot = document.createElement("span");
+        dot.className = "sidebar__unread";
+        const label = document.createElement("span");
+        label.className = "visually-hidden";
+        label.textContent = "unread messages";
+        dot.append(label);
+        button.append(dot);
+    }
+
+    button.addEventListener("click", onClick);
+    item.append(button);
+    return item;
+}
+
+function renderSidebar() {
+    if (activeChat.type === "general") {
+        generalButton.setAttribute("aria-current", "true");
+    } else {
+        generalButton.removeAttribute("aria-current");
+    }
+    generalButton.classList.toggle("sidebar__item--unread", generalHasUnread);
+    generalUnread.hidden = !generalHasUnread;
+
+    const sorted = [...conversations.values()].sort(
+        (a, b) => activityTime(b) - activityTime(a)
+    );
+    conversationList.replaceChildren(
+        ...sorted.map((conversation) =>
+            buildSidebarItem({
+                icon: "@",
+                name: conversation.other_username,
+                active: isActiveConversation(conversation.id),
+                unread: conversation.unread,
+                onClick: () => openPrivateChat(conversation),
+            })
+        )
+    );
+    conversationEmpty.hidden = !sidebarLoaded || sorted.length > 0;
+
+    // "Start a chat" lists everyone we don't already have a conversation with.
+    const inConversation = new Set(sorted.map((conversation) => conversation.other_user_id));
+    const others = allUsers.filter(
+        (user) => user.id !== currentUserId && !inConversation.has(user.id)
+    );
+    userList.replaceChildren(
+        ...others.map((user) =>
+            buildSidebarItem({
+                icon: user.username.charAt(0).toUpperCase(),
+                name: user.username,
+                onClick: () => startConversation(user.id),
+            })
+        )
+    );
+    userEmpty.hidden = !sidebarLoaded || others.length > 0;
+
+    const anyUnread = generalHasUnread || sorted.some((conversation) => conversation.unread);
+    sidebarToggle.classList.toggle("sidebar-toggle--unread", anyUnread);
 }
 
 function startChat() {
@@ -473,8 +765,27 @@ messageForm.addEventListener("submit", (event) => {
     }
 
     clearChatError();
-    socket.send(JSON.stringify({ type: "message", content }));
+    const frame =
+        activeChat.type === "private"
+            ? { type: "private_message", conversation_id: activeChat.conversationId, content }
+            : { type: "message", content };
+    socket.send(JSON.stringify(frame));
     messageInput.value = "";
+});
+
+generalButton.addEventListener("click", () => {
+    openChat(GENERAL_CHAT);
+});
+
+sidebarToggle.addEventListener("click", () => {
+    setSidebarOpen(!chatView.classList.contains("chat--sidebar-open"));
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && chatView.classList.contains("chat--sidebar-open")) {
+        setSidebarOpen(false);
+        sidebarToggle.focus();
+    }
 });
 
 historyRetry.addEventListener("click", () => {
