@@ -1,11 +1,9 @@
-def get_auth_headers(client, username="alice", password="alice-password"):
-    client.post("/users", json={"username": username, "password": password})
-    login_response = client.post(
-        "/auth/login",
-        json={"username": username, "password": password},
-    )
-    token = login_response.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
+from tests.helpers import auth_headers, register_and_login
+
+
+def get_auth_headers(client, username="alice"):
+    _, token = register_and_login(client, username)
+    return auth_headers(token)
 
 
 def test_me_without_token(client):
