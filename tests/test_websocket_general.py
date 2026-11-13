@@ -1,58 +1,29 @@
-import time
-from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from starlette.websockets import WebSocketDisconnect
 
 from backend.app import crud, security
 from backend.app import main as main_module
-from backend.app.connection_manager import manager
+from tests.helpers import (
+    assert_closed_1008,
+    assert_error,
+    auth_headers,
+    connect_authenticated,
+    register_and_login,
+    wait_for_connections,
+)
 
 
 def get_token(client, username):
-    password = f"{username}-password"
-    client.post("/users", json={"username": username, "password": password})
-    response = client.post(
-        "/auth/login", json={"username": username, "password": password}
-    )
-    return response.json()["access_token"]
-
-
-@contextmanager
-def connect_authenticated(client, token):
-    with client.websocket_connect("/ws") as ws:
-        ws.send_json({"type": "auth", "data": {"token": token}})
-        assert ws.receive_json()["type"] == "auth_ok"
-        yield ws
-
-
-def assert_closed_1008(ws):
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        ws.receive_json()
-    assert exc_info.value.code == 1008
-
-
-def assert_error(ws, text):
-    frame = ws.receive_json()
-    assert frame["type"] == "error"
-    assert frame["content"] == text
+    _, token = register_and_login(client, username)
+    return token
 
 
 def get_history(client, token):
-    response = client.get("/messages", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/messages", headers=auth_headers(token))
     assert response.status_code == 200
     return response.json()
-
-
-def wait_for_connections(expected, timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if len(manager.active_connections) == expected:
-            return
-        time.sleep(0.01)
-    assert len(manager.active_connections) == expected
 
 
 # ---------- test environment safety ----------

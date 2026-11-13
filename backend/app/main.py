@@ -132,21 +132,15 @@ def start_conversation(
             detail="Cannot start a conversation with yourself",
         )
 
-    user_not_found = HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="User not found",
-    )
     if crud.get_user_by_id(db, conversation_in.user_id) is None:
-        raise user_not_found
-
-    try:
-        conversation = crud.get_or_create_conversation(
-            db, current_user.id, conversation_in.user_id
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
         )
-    except IntegrityError:
-        # The other user was deleted between the check above and the insert.
-        db.rollback()
-        raise user_not_found
+
+    conversation = crud.get_or_create_conversation(
+        db, current_user.id, conversation_in.user_id
+    )
 
     latest = crud.get_recent_private_messages(db, conversation.id, limit=1)
     last_message_at = latest[0].created_at if latest else None
@@ -206,7 +200,11 @@ def authenticate_token(token: str) -> tuple[int, str, float] | None:
         db.close()
 
 
+# The save functions below raise SQLAlchemyError if the database fails;
+# handle_frame turns that into an error frame for the sender.
+
 def save_chat_message(user_id: int, content: str) -> dict | None:
+    """Save a General message. Returns its JSON payload, or None if General is missing."""
     db = SessionLocal()
     try:
         room = crud.get_default_room(db)
@@ -214,62 +212,79 @@ def save_chat_message(user_id: int, content: str) -> dict | None:
             return None
         message = crud.create_message(db, room.id, user_id, content)
         return schemas.MessageResponse.model_validate(message).model_dump(mode="json")
-    except SQLAlchemyError:
-        db.rollback()
-        return None
     finally:
         db.close()
 
 
 def save_private_message(
     sender_id: int, conversation_id: int, content: str
-) -> tuple[dict, set[int]] | str:
-    """Save a private message if the sender belongs to the conversation.
+) -> tuple[dict, set[int]] | None:
+    """Save a private message.
 
-    Returns (payload, participant IDs) on success, or an error message.
+    Returns (JSON payload, IDs of both participants), or None if the sender
+    is not part of the conversation.
     """
     db = SessionLocal()
     try:
         conversation = crud.get_conversation_for_user(db, conversation_id, sender_id)
         if conversation is None:
-            return "Conversation not found"
+            return None
         message = crud.create_private_message(db, conversation.id, sender_id, content)
         payload = schemas.PrivateMessageResponse.model_validate(message).model_dump(
             mode="json"
         )
         return payload, {conversation.user_low_id, conversation.user_high_id}
-    except SQLAlchemyError:
-        db.rollback()
-        return "Message could not be saved"
     finally:
         db.close()
 
 
-async def handle_private_message(websocket: WebSocket, user_id: int, frame: dict):
-    conversation_id = frame.get("conversation_id")
-    # bool is a subclass of int, so reject it explicitly.
-    if not isinstance(conversation_id, int) or isinstance(conversation_id, bool):
-        await websocket.send_json({"type": "error", "content": "Conversation not found"})
+async def send_error(websocket: WebSocket, text: str) -> None:
+    await websocket.send_json({"type": "error", "content": text})
+
+
+async def handle_frame(websocket: WebSocket, user_id: int, frame) -> None:
+    """Handle one frame from an authenticated client.
+
+    {"type": "message", "content": ...}                          -> everyone
+    {"type": "private_message", "conversation_id": N, "content": ...} -> the two participants
+    """
+    frame_type = frame.get("type") if isinstance(frame, dict) else None
+    if frame_type not in ("message", "private_message"):
+        await send_error(websocket, "Unsupported message type")
         return
 
     try:
-        message_in = schemas.MessageCreate(content=frame.get("content"))
+        content = schemas.MessageCreate(content=frame.get("content")).content
     except ValidationError:
-        await websocket.send_json(
-            {"type": "error", "content": "Message content is invalid"}
+        await send_error(websocket, "Message content is invalid")
+        return
+
+    try:
+        if frame_type == "message":
+            payload = save_chat_message(user_id, content)
+            if payload is None:
+                await send_error(websocket, "Message could not be saved")
+                return
+            await manager.broadcast({"type": "message", "data": payload})
+            return
+
+        conversation_id = frame.get("conversation_id")
+        # type(...) is int also rejects True/False, which isinstance would accept.
+        result = None
+        if type(conversation_id) is int:
+            result = save_private_message(user_id, conversation_id, content)
+        if result is None:
+            # Same reply for unknown IDs and other people's conversations,
+            # so conversation IDs aren't revealed.
+            await send_error(websocket, "Conversation not found")
+            return
+        payload, participant_ids = result
+        # Both participants, on every open tab (including the sender's own).
+        await manager.send_to_users(
+            participant_ids, {"type": "private_message", "data": payload}
         )
-        return
-
-    result = save_private_message(user_id, conversation_id, message_in.content)
-    if isinstance(result, str):
-        await websocket.send_json({"type": "error", "content": result})
-        return
-
-    payload, participant_ids = result
-    # Both participants, on every open tab (including the sender's own).
-    await manager.send_to_users(
-        participant_ids, {"type": "private_message", "data": payload}
-    )
+    except SQLAlchemyError:
+        await send_error(websocket, "Message could not be saved")
 
 
 @app.websocket("/ws")
@@ -323,37 +338,10 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
             except (ValueError, KeyError, TypeError):
-                await websocket.send_json(
-                    {"type": "error", "content": "Invalid message format"}
-                )
+                await send_error(websocket, "Invalid message format")
                 continue
 
-            if isinstance(frame, dict) and frame.get("type") == "private_message":
-                await handle_private_message(websocket, user_id, frame)
-                continue
-
-            if not isinstance(frame, dict) or frame.get("type") != "message":
-                await websocket.send_json(
-                    {"type": "error", "content": "Unsupported message type"}
-                )
-                continue
-
-            try:
-                message_in = schemas.MessageCreate(content=frame.get("content"))
-            except ValidationError:
-                await websocket.send_json(
-                    {"type": "error", "content": "Message content is invalid"}
-                )
-                continue
-
-            payload = save_chat_message(user_id, message_in.content)
-            if payload is None:
-                await websocket.send_json(
-                    {"type": "error", "content": "Message could not be saved"}
-                )
-                continue
-
-            await manager.broadcast({"type": "message", "data": payload})
+            await handle_frame(websocket, user_id, frame)
     except WebSocketDisconnect:
         pass
     finally:

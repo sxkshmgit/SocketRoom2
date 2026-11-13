@@ -2,32 +2,28 @@ import pytest
 
 from backend.app import crud
 from backend.app import main as main_module
+from tests.helpers import auth_headers, register_and_login
 
 
-def register_and_login(client, username):
-    password = f"{username}-password"
-    response = client.post("/users", json={"username": username, "password": password})
-    user_id = response.json()["id"]
-    login_response = client.post(
-        "/auth/login", json={"username": username, "password": password}
-    )
-    token = login_response.json()["access_token"]
-    return user_id, {"Authorization": f"Bearer {token}"}
+def user_with_headers(client, username):
+    """Return (user_id, auth headers) for a new user."""
+    user_id, token = register_and_login(client, username)
+    return user_id, auth_headers(token)
 
 
 @pytest.fixture
 def alice(client):
-    return register_and_login(client, "alice")
+    return user_with_headers(client, "alice")
 
 
 @pytest.fixture
 def bob(client):
-    return register_and_login(client, "bob")
+    return user_with_headers(client, "bob")
 
 
 @pytest.fixture
 def carol(client):
-    return register_and_login(client, "carol")
+    return user_with_headers(client, "carol")
 
 
 def start_conversation(client, headers, other_user_id):
@@ -35,8 +31,8 @@ def start_conversation(client, headers, other_user_id):
 
 
 def add_private_message(conversation_id, sender_id, content):
-    # No WebSocket support for private messages yet, so write through CRUD.
-    # The client fixture points SessionLocal at the in-memory test database.
+    # These tests are about the HTTP routes, so write messages directly
+    # through CRUD. The client fixture points SessionLocal at the test database.
     with main_module.SessionLocal() as db:
         return crud.create_private_message(db, conversation_id, sender_id, content).id
 

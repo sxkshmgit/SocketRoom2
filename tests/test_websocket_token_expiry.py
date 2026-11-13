@@ -3,36 +3,20 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
-from starlette.websockets import WebSocketDisconnect
 
 from backend.app import security
-from backend.app.connection_manager import manager
+from tests.helpers import assert_closed_1008, register_and_login, wait_for_connections
 
 
 def register(client, username):
-    response = client.post(
-        "/users", json={"username": username, "password": f"{username}-password"}
-    )
-    return response.json()["id"]
+    user_id, _ = register_and_login(client, username)
+    return user_id
 
 
 def short_lived_token(user_id, seconds):
     return security.create_access_token(
         data={"sub": str(user_id)}, expires_delta=timedelta(seconds=seconds)
     )
-
-
-def assert_closed_1008(ws):
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        ws.receive_json()
-    assert exc_info.value.code == 1008
-
-
-def wait_for_no_connections(timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while manager.active_connections and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert manager.active_connections == {}
 
 
 def test_connection_works_until_token_expires_then_closes_with_1008(client):
@@ -51,7 +35,7 @@ def test_connection_works_until_token_expires_then_closes_with_1008(client):
         # JWT expiry has one-second resolution, so allow for rounding.
         assert time.monotonic() - started < 3.5
 
-    wait_for_no_connections()
+    wait_for_connections(0)
 
 
 def test_idle_connection_is_closed_at_expiry(client):
@@ -63,7 +47,7 @@ def test_idle_connection_is_closed_at_expiry(client):
         assert ws.receive_json()["type"] == "auth_ok"
         assert_closed_1008(ws)
 
-    wait_for_no_connections()
+    wait_for_connections(0)
 
 
 def test_expiry_of_one_connection_does_not_affect_others(client):

@@ -396,7 +396,7 @@ SocketRoom2 is intentionally a small application. Its current design has these l
 - **No migrations:** tables are created with SQLAlchemy's **create_all**, which creates missing tables but never alters existing ones. Schema changes to existing tables must be applied manually.
 - **Recent history only:** the API returns up to 100 recent messages per request. Older-message pagination is not implemented.
 - **No explicit send acknowledgement:** the WebSocket protocol does not provide a client message ID and server acknowledgement for each send. A connection failure at the wrong moment can therefore leave the sender unsure whether a message was saved.
-- **WebSocket sessions outlive tokens:** a WebSocket connection authenticated with a valid JWT stays open after that token expires.
+- **Short sessions, no refresh:** tokens expire after 30 minutes, and the server then closes the WebSocket with code 1008, so users must log in again. There is no token refresh.
 - **Unread markers are not stored:** they are tracked in the browser and reset on page reload. Newly registered users appear in the "Start a chat" list after a reconnect or page reload.
 - **No distributed broker:** there is no Redis or other pub/sub layer for coordinating multiple application processes.
 - **Basic abuse protection:** rate limiting, connection caps, user blocking, and production-grade abuse controls are not implemented.
